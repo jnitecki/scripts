@@ -2,7 +2,7 @@
 
 ## Scope
 A `post-commit` git hook that automatically creates the release tags defined
-by [[script-autoupdate-convention]] (`<lang>/<script-name>/v<X.Y.Z>`),
+by [[script-upgrade-convention]] (`<lang>/<script-name>/v<X.Y.Z>`),
 resolving that document's open follow-up item ("How/when release tags
 actually get created ... is undecided"). Depends on
 [[script-header-convention]] for locating each script's `Version:` line, and
@@ -34,7 +34,7 @@ Every qualifying version change is tagged, stable or pre-release — the
 header's version string (`X.Y.Z`, optionally with a `-dev`/`-alpha`/`-beta`/
 `-rc` suffix, per the syntax [[script-catalog-generator]] already defines)
 is used verbatim as the tag's version component. See
-[[script-autoupdate-convention]] (updated alongside this doc) for how a
+[[script-upgrade-convention]] (updated alongside this doc) for how a
 downloading script chooses whether to consider pre-release tags at all.
 
 ### 2. Tag creation
@@ -44,16 +44,26 @@ pointing at the new `HEAD`, with two independent fields:
 - **Ref name** — fixed format only, never carries changelog content:
   `<lang>/<script-name>/v<X.Y.Z>` (or `v<X.Y.Z>-<suffix>` for a
   pre-release version), exactly the pattern
-  [[script-autoupdate-convention]] defines for tag discovery. This is the
+  [[script-upgrade-convention]] defines for tag discovery. This is the
   only part any tooling matches/parses against.
 - **Annotation message** — the tag's `-m` body (`git tag -a <name> -m
   "<message>"`), i.e. its description field, unrelated to the ref name and
   never consulted by discovery:
   ```
-  <script-name> (<lang>) v<X.Y.Z>
+  [<hash>] <script-name> (<lang>) v<X.Y.Z>
 
   <changelog excerpt, see below>
   ```
+  `<hash>` is the first 12 hex characters of the plain SHA-1 hash (`sha1sum`
+  on Linux, falling back to `shasum -a 1` on macOS, per
+  [[cross-platform-shell-compatibility]]) of the script file's raw content
+  at the commit being tagged — the same content the tag itself points at.
+  This is a lightweight content fingerprint for spotting accidental
+  mismatches, not a cryptographic integrity guarantee, and is deliberately
+  the plain hash of the file's bytes (not git's internal blob-object hash,
+  which prepends a `blob <length>\0` header) so any client can reproduce it
+  with a single standard command, without needing git. It has no bearing on
+  the ref name (still fixed-format only, per above) or on tag discovery.
 
 **Changelog excerpt extraction**: within the script's "Version history"
 block ([[script-versioning-changelog-help-convention]] section 2), find the
@@ -161,7 +171,7 @@ installed the same way.
   changes** (keep only the latest tag per script): rejected — breaks the
   append-only release history this repo already keeps for everything else
   (script changelogs, tag list), and isn't needed by
-  [[script-autoupdate-convention]]'s discovery algorithm, which already
+  [[script-upgrade-convention]]'s discovery algorithm, which already
   only cares about the *highest* matching (by default, stable-only) tag
   regardless of how many older ones exist.
 - **Hook pushes automatically, gated on whether the commit is already on
@@ -177,7 +187,7 @@ installed the same way.
 - **Only tagging stable versions**: an earlier draft of this doc. Changed
   to tagging every version, pre-release included — filtering pre-releases
   out of *discovery* (a downloading script's decision, see
-  [[script-autoupdate-convention]]) is a different concern from whether a
+  [[script-upgrade-convention]]) is a different concern from whether a
   release tag exists for them at all.
 - **No changelog excerpt in the tag message, or extraction based on
   matching each continuation line's indentation column**: an earlier draft
@@ -185,9 +195,15 @@ installed the same way.
   (indentation-based) in favor of the simpler start/end rule in section 2 —
   bounded by the next version number or a blank line, with no assumption
   about how far continuation lines are indented.
+- **`git hash-object` (git's blob SHA-1) instead of a plain file hash**:
+  rejected — it's SHA-1 over git's internal `blob <length>\0<content>`
+  object format, not the file's raw bytes, so a client without git would
+  need to replicate that header exactly to reproduce the same value. A
+  plain `sha1sum`/`shasum -a 1` of the file content is one standard command
+  for any client, with no git-specific format to reimplement.
 
 ## Rationale
-Closes the one open question left by [[script-autoupdate-convention]]:
+Closes the one open question left by [[script-upgrade-convention]]:
 release tags now come into existence automatically, from the same
 `Version:` header that already drives the changelog, `--help`, and startup
 banner, so there is exactly one place a script's version is declared and

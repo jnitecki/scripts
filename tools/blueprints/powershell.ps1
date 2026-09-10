@@ -1,10 +1,14 @@
-# Reference blueprint — PowerShell — for the autoupdate mechanism defined in
-# docs/requirements/generic/script-autoupdate-convention.md.
+# Reference blueprint — PowerShell — for the self-upgrade mechanism defined
+# in docs/requirements/generic/script-upgrade-convention.md.
 #
 # Sketch only: no PowerShell script exists in this repo yet (see
-# platforms/), so this has not been exercised against a real script. Treat
-# it as a starting point to refine once the first platforms/powershell/
-# script adopts autoupdate, not as a finished, tested implementation.
+# platforms/), so this has not been exercised against a real script, and it
+# has NOT been updated for that convention's apply-mode/level/cache rework
+# (four apply modes with fallback, --upgrade-level, the persistent cache,
+# trial-run-then-persist) — tools/blueprints/bash.sh is the current
+# reference for that; treat this file as a starting point to refine once
+# the first platforms/powershell/ script adopts self-upgrade, not as a
+# finished, tested implementation.
 #
 # Like the bash blueprint, this is NOT sourced by a deployed script at
 # runtime — scripts are self-contained single files; copy/adapt the

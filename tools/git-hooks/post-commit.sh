@@ -15,9 +15,10 @@
 # no other version's tag is ever touched.
 #
 # The tag's annotation message is a separate field from its (fixed-format)
-# name: an identity line plus a best-effort excerpt of that version's entry
-# from the script's own "Version history" header block, truncated to 500
-# characters.
+# name: a 12-hex-char SHA-1 fingerprint of the tagged file's content,
+# prefixed onto the identity line, plus a best-effort excerpt of that
+# version's entry from the script's own "Version history" header block,
+# truncated to 500 characters.
 #
 # Never pushes anything, under any condition — see README.md for the
 # one-time `git config push.followTags` step that makes a plain `git push`
@@ -43,6 +44,7 @@ EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 HEADER_SCAN_LINES=20
 CHANGELOG_SCAN_LINES=300
 EXCERPT_MAX_CHARS=500
+HASH_PREFIX_CHARS=12
 
 if git rev-parse -q --verify HEAD^1 >/dev/null 2>&1; then
     BASE="HEAD^1"
@@ -114,6 +116,23 @@ extract_changelog_excerpt() {
     printf '%s' "${excerpt}"
 }
 
+# $1 = git ref (commit-ish), $2 = path (relative to repo root).
+# Prints the first HASH_PREFIX_CHARS hex characters of the plain SHA-1 hash
+# of that file's content at that ref (not git's internal blob-object hash),
+# or nothing if neither sha1sum nor shasum is available.
+file_hash_prefix() {
+    local ref="$1" path="$2"
+    local full
+    if command -v sha1sum >/dev/null 2>&1; then
+        full="$(git show "${ref}:${path}" 2>/dev/null | sha1sum | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        full="$(git show "${ref}:${path}" 2>/dev/null | shasum -a 1 | cut -d' ' -f1)"
+    else
+        return 0
+    fi
+    printf '%s' "${full:0:${HASH_PREFIX_CHARS}}"
+}
+
 # $1 = path changed in this commit, relative to repo root.
 tag_script() {
     local path="$1"
@@ -144,11 +163,15 @@ tag_script() {
     [ "${post_version}" = "${pre_version}" ] && return 0
 
     local tag_name="${lang}/${script_name}/v${post_version}"
-    local content excerpt message
+    local content excerpt hash message identity_line
     content="$(git show "HEAD:${path}" 2>/dev/null | head -n "${CHANGELOG_SCAN_LINES}")"
     excerpt="$(extract_changelog_excerpt "${content}" "${post_version}")"
+    hash="$(file_hash_prefix "HEAD" "${path}")"
 
-    message="${script_name} (${lang}) v${post_version}"
+    identity_line="${script_name} (${lang}) v${post_version}"
+    [ -n "${hash}" ] && identity_line="[${hash}] ${identity_line}"
+
+    message="${identity_line}"
     if [ -n "${excerpt}" ]; then
         message="${message}"$'\n\n'"${excerpt}"
     fi

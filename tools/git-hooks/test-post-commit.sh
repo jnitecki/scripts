@@ -5,8 +5,9 @@
 # Exercises tools/git-hooks/post-commit.sh against a scratch git repo:
 # initial tag creation, a version bump (old tag preserved), an idempotent
 # re-tag (amend without a version change), changelog excerpt extraction
-# and its 500-character truncation, a brand-new script's first tag, a
-# non-qualifying commit producing no tag, and that nothing gets pushed.
+# and its 500-character truncation, the content-hash prefix on the
+# identity line, a brand-new script's first tag, a non-qualifying commit
+# producing no tag, and that nothing gets pushed.
 #
 # Usage: tools/git-hooks/test-post-commit.sh
 
@@ -21,6 +22,18 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 FAILURES=0
 fail() { echo "FAIL: $1" >&2; FAILURES=$((FAILURES + 1)); }
 pass() { echo "PASS: $1"; }
+
+# $1 = file path. Prints the first 12 hex chars of the plain SHA-1 hash of
+# its content, the same way post-commit.sh's file_hash_prefix() does.
+expected_hash_prefix() {
+    local full
+    if command -v sha1sum >/dev/null 2>&1; then
+        full="$(sha1sum "$1" | cut -d' ' -f1)"
+    else
+        full="$(shasum -a 1 "$1" | cut -d' ' -f1)"
+    fi
+    printf '%s' "${full:0:12}"
+}
 
 REPO="${WORKDIR}/repo"
 mkdir -p "${REPO}"
@@ -81,6 +94,14 @@ case "${MSG}" in
         pass "changelog excerpt present in tag message" ;;
     *)
         fail "changelog excerpt missing from tag message: ${MSG}" ;;
+esac
+
+EXPECTED_HASH="$(expected_hash_prefix platforms/bash/widget/widget.sh)"
+case "${MSG}" in
+    "[${EXPECTED_HASH}] widget (bash) v1.0.1"*)
+        pass "content-hash prefix present and matches file content" ;;
+    *)
+        fail "content-hash prefix missing or wrong (expected [${EXPECTED_HASH}]): ${MSG}" ;;
 esac
 
 OLD_SHA="$(git rev-parse "refs/tags/bash/widget/v1.0.0")"

@@ -4,8 +4,8 @@
 Applies to every script in this repository, regardless of scripting/programming
 language or the platform/category directory it lives under. Builds on
 [[script-header-convention]] (the `Version:`/`Category:`/`Description:` header
-fields). See also [[script-autoupdate-convention]], which extends the startup
-banner defined in section 4 below with an update-check outcome note.
+fields). See also [[script-upgrade-convention]], which extends the startup
+banner defined in section 4 below with an upgrade-check outcome note.
 
 ## Requirement
 
@@ -57,16 +57,16 @@ banner defined in section 4 below with an update-check outcome note.
 - `--help` shows the version as part of its usage text and does not need to
   print this separate banner line, since the invocation exits immediately
   afterward without doing any real work.
-- A script that implements [[script-autoupdate-convention]] appends an
-  update-check outcome note to this same line when relevant (update applied,
-  update fetched but run standalone this invocation, or the check itself
-  failed) — see that doc for the exact note formats.
+- A script that implements [[script-upgrade-convention]] appends an
+  upgrade-check outcome note to this same line when relevant (upgrade
+  applied, upgrade fetched but run standalone this invocation, or the check
+  itself failed) — see that doc for the exact note formats.
 
 ### 5. Exit codes
 - The script's exit code must reflect whether the run completed cleanly:
   `0` if no errors occurred, non-zero if any did. "The process reached the
   end" is not sufficient on its own to justify exit code `0`.
-- A failed or skipped autoupdate check (see [[script-autoupdate-convention]])
+- A failed or skipped upgrade check (see [[script-upgrade-convention]])
   never counts as an error for this purpose — exit code reflects only the
   outcome of the script's actual functional work.
 

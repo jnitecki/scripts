@@ -5,8 +5,8 @@ Applies to every script in this repository, regardless of scripting/programming
 language or the platform/category directory it lives under. See also
 [[script-versioning-changelog-help-convention]] for the version-bumping,
 in-script changelog, `--help`, exit-code, and startup-banner rules that build
-on this header, and [[script-autoupdate-convention]] for the optional
-`Update-Source:` header line used by scripts that support self-update.
+on this header, and [[script-upgrade-convention]] for the optional
+`Upgrade-Source:` header line used by scripts that support self-upgrade.
 
 ## Requirement
 Every script file must begin with a header containing, expressed using that
