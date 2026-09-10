@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # generate-catalog.sh
-# Version: 2.1.0
+# Version: 2.2.0
 #
 # Scans platforms/<lang>/<script-name>/ for script files, reads their header
 # metadata (# Version / # Category / # Description comment lines), and
@@ -27,13 +27,26 @@
 # from clobbering the published catalog. See "Pre-release version guard"
 # below for the exact precedence rule.
 #
-# Usage:
-#   tools/generate-catalog.sh [--check]
+# Category values are validated against ^[a-z0-9]+(-[a-z0-9]+)*$ (lowercase,
+# hyphen-separated) — see docs/requirements/generic/script-header-convention.md.
+# An invalid value aborts the run before anything is written, since it's
+# exactly what would let two differently-spelled categories collide onto
+# the same category filename.
 #
-#   --check   Don't write any files. Exit non-zero if regenerating would
-#             change CATALOG.md, any category file's content, or the set of
-#             category files that should exist (useful as a CI / pre-commit
-#             gate).
+# Usage:
+#   tools/generate-catalog.sh [--check] [--source=worktree|index]
+#
+#   --check          Don't write any files. Exit non-zero if regenerating
+#                     would change CATALOG.md, any category file's content,
+#                     or the set of category files that should exist
+#                     (useful as a CI / pre-commit gate).
+#   --source=index    Scan the git index (what's staged) instead of the
+#                     working tree — enumerate via `git ls-files --cached`
+#                     and read content via `git show :<path>`. Used by
+#                     tools/git-hooks/pre-commit.sh so the catalog reflects
+#                     exactly what's about to be committed, not whatever
+#                     else happens to be sitting on disk. Default is
+#                     `--source=worktree` (today's disk-scanning behavior).
 
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "ERROR: this script requires bash. Run it as './generate-catalog.sh' or 'bash generate-catalog.sh', not 'sh generate-catalog.sh'." >&2
@@ -52,8 +65,23 @@ PLATFORMS_DIR="${REPO_ROOT}/platforms"
 CATALOG_FILE="${REPO_ROOT}/CATALOG.md"
 
 CHECK_MODE=0
-if [[ "${1:-}" == "--check" ]]; then
-    CHECK_MODE=1
+SOURCE_MODE="worktree"
+for arg in "$@"; do
+    case "${arg}" in
+        --check) CHECK_MODE=1 ;;
+        --source=worktree) SOURCE_MODE="worktree" ;;
+        --source=index) SOURCE_MODE="index" ;;
+        *)
+            echo "ERROR: unknown argument '${arg}'" >&2
+            echo "Usage: tools/generate-catalog.sh [--check] [--source=worktree|index]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "${SOURCE_MODE}" == "index" ]] && ! git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "ERROR: --source=index requires running inside a git repository" >&2
+    exit 1
 fi
 
 # Extensions we know how to scan, mapped to a display label.
@@ -105,10 +133,22 @@ title_first() {
 # line-comment marker, so one regex set covers all of them.
 
 HEADER_SCAN_LINES=20
+CATEGORY_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+# $1 = path relative to REPO_ROOT. Prints its first HEADER_SCAN_LINES lines,
+# read from the working tree or the git index per SOURCE_MODE.
+read_header_lines() {
+    local relpath="$1"
+    if [[ "${SOURCE_MODE}" == "index" ]]; then
+        git -C "${REPO_ROOT}" show ":${relpath}" 2>/dev/null | head -n "${HEADER_SCAN_LINES}"
+    else
+        head -n "${HEADER_SCAN_LINES}" "${REPO_ROOT}/${relpath}"
+    fi
+}
 
 extract_field() {
-    local file="$1" field="$2"
-    head -n "${HEADER_SCAN_LINES}" "${file}" \
+    local relpath="$1" field="$2"
+    read_header_lines "${relpath}" \
         | grep -m1 -E "^[[:space:]]*#[[:space:]]*${field}:[[:space:]]*" \
         | sed -E "s/^[[:space:]]*#[[:space:]]*${field}:[[:space:]]*//" \
         || true
@@ -129,23 +169,36 @@ extract_field() {
 # expanded from ROWS_FILE and de-duplicated — used both to find every
 # category a script belongs to, and every script in a given category.
 
+# Enumerates platforms/**/* relative to REPO_ROOT, NUL-separated — from the
+# working tree or the git index per SOURCE_MODE. Extension filtering happens
+# per-item in the loop below (both modes may yield non-script files).
+list_relpaths() {
+    if [[ "${SOURCE_MODE}" == "index" ]]; then
+        git -C "${REPO_ROOT}" ls-files --cached -z -- 'platforms'
+    else
+        find "${PLATFORMS_DIR}" -type f \( -false \
+            $(for e in ${SCAN_EXTENSIONS}; do printf -- '-o -name *.%s ' "$e"; done) \
+        \) -print0 | while IFS= read -r -d '' f; do printf '%s\0' "${f#"${REPO_ROOT}"/}"; done
+    fi
+}
+
 ROWS_FILE="$(mktemp)"
 CATSPLIT_FILE="$(mktemp)"
 trap 'rm -f "${ROWS_FILE}" "${CATSPLIT_FILE}"' EXIT
 
 WARNINGS=0
+INVALID_CATEGORY=0
 
-while IFS= read -r -d '' filepath; do
-    ext="${filepath##*.}"
+while IFS= read -r -d '' relpath; do
+    ext="${relpath##*.}"
     label="$(label_for_ext "${ext}")"
     [[ -z "${label}" ]] && continue
 
-    relpath="${filepath#"${REPO_ROOT}"/}"
-    key="$(basename "$(dirname "${filepath}")")"
+    key="$(basename "$(dirname "${relpath}")")"
 
-    version="$(extract_field "${filepath}" "Version")"
-    category_raw="$(extract_field "${filepath}" "Category")"
-    description="$(extract_field "${filepath}" "Description")"
+    version="$(extract_field "${relpath}" "Version")"
+    category_raw="$(extract_field "${relpath}" "Category")"
+    description="$(extract_field "${relpath}" "Description")"
 
     if [[ -z "${category_raw}" ]]; then
         echo "WARNING: ${relpath} has no '# Category:' header — filing under uncategorized" >&2
@@ -171,6 +224,10 @@ while IFS= read -r -d '' filepath; do
     for tok in "${_cat_tokens[@]}"; do
         tok="$(trim "${tok}")"
         [[ -z "${tok}" ]] && continue
+        if [[ ! "${tok}" =~ ${CATEGORY_RE} ]]; then
+            echo "ERROR: ${relpath} has invalid Category value '${tok}' — must be lowercase letters/digits, hyphen-separated (e.g. 'web-scraping')." >&2
+            INVALID_CATEGORY=1
+        fi
         printf '%s\t%s\n' "${key}" "${tok}" >> "${CATSPLIT_FILE}"
         categories_joined="${categories_joined:+${categories_joined}, }${tok}"
     done
@@ -178,9 +235,12 @@ while IFS= read -r -d '' filepath; do
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
         "${key}" "${label}" "${version}" "${categories_joined}" "${description}" "${relpath}" \
         >> "${ROWS_FILE}"
-done < <(find "${PLATFORMS_DIR}" -type f \( -false \
-            $(for e in ${SCAN_EXTENSIONS}; do printf -- '-o -name *.%s ' "$e"; done) \
-          \) -print0)
+done < <(list_relpaths)
+
+if [[ "${INVALID_CATEGORY}" -eq 1 ]]; then
+    echo "ERROR: invalid Category value(s) found — no files were written." >&2
+    exit 1
+fi
 
 if [[ ! -s "${ROWS_FILE}" ]]; then
     echo "ERROR: no scripts found under ${PLATFORMS_DIR}" >&2

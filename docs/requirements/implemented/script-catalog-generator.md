@@ -67,13 +67,32 @@ one such script exists).
 ### Single generator, atomic output
 `tools/generate-catalog.sh` produces CATALOG.md and every per-category file
 in a single invocation. All content is rendered and validated (including
-collision detection) before anything is written, so a failed run leaves the
-existing files untouched rather than partially updated.
+category-value format and filename-collision checks) before anything is
+written, so a failed run leaves the existing files untouched rather than
+partially updated.
 
 `--check` mode validates the entire generated set in one pass — every
 file's content against a fresh render, and the set of category files that
 exist on disk against the set that should exist — and exits non-zero
-without writing if anything is stale, for use as a CI / pre-commit gate.
+without writing if anything is stale, for use as a CI gate.
+
+### Source: working tree or git index
+`--source=worktree` (default) scans `platforms/` on disk, as before.
+`--source=index` scans the git index instead — file enumeration via
+`git ls-files --cached` and content reads via `git show :<path>` — so the
+generated catalog reflects exactly what's staged, not whatever else is
+sitting in the working tree. Used by
+[[catalog-precommit-hook]] (`tools/git-hooks/pre-commit.sh`) so a partially-
+staged or unstaged edit to a platform script never leaks into a commit's
+catalog. Both modes share the same rendering, pre-release-guard, and
+validation logic — only file enumeration and content reads differ.
+
+### Category value format
+Each `Category:` token must match `^[a-z0-9]+(-[a-z0-9]+)*$` (see
+[[script-header-convention]]). A non-conforming value is a hard error —
+exit non-zero, nothing written, naming the offending file and value — same
+severity as the filename-collision check below, since an invalid value is
+exactly what makes that collision possible.
 
 ### Pre-release version guard
 A script's `Version:` header may carry a pre-release suffix: `-dev`,

@@ -23,6 +23,16 @@ language's native comment syntax:
    (e.g. `containers`, `backup`, `networking`), comma-separated on the single
    `Category:` line when a script belongs to more than one. There is no
    fixed/enumerated list of categories — see "Choosing a category" below.
+   Each category value must match `^[a-z0-9]+(-[a-z0-9]+)*$` — lowercase
+   letters/digits, words separated by a single hyphen, no spaces or other
+   punctuation (e.g. `web-scraping`, not `Web Scraping` or `web scraping`).
+   This is enforced by `tools/generate-catalog.sh`, which aborts with no
+   files written if a scanned value doesn't conform — see
+   [[script-catalog-generator]]. The restriction exists because the catalog
+   generator derives each category's output filename by uppercasing the
+   value and converting spaces to hyphens; two differently-formatted values
+   for what's meant to be the same category (e.g. differing only in case,
+   or space vs. hyphen) would otherwise collide onto the same filename.
 4. **Description** — `Description: <one-line summary>`, a concise statement
    of what the script does.
 

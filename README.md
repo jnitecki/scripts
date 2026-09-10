@@ -41,3 +41,21 @@ To verify the hook works as expected, run:
 ```
 tools/git-hooks/test-post-commit.sh
 ```
+
+### Catalog regeneration
+
+Any commit that touches `platforms/`, `CATALOG.md`, or a per-category file
+(e.g. `CONTAINERS.md`) regenerates the catalog from what's actually staged
+and includes the result in that same commit, via a `pre-commit` hook. A
+category-filename collision or an invalid `Category:` header value aborts
+the commit.
+
+To enable it in a local clone (one-time setup):
+```
+ln -sf ../../tools/git-hooks/pre-commit.sh .git/hooks/pre-commit
+```
+
+To verify the hook works as expected, run:
+```
+tools/git-hooks/test-pre-commit.sh
+```
