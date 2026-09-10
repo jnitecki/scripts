@@ -36,6 +36,7 @@ At the start of every task:
 - Prefer localized changes unless I specifically ask or approve re-factoring.
 
 ## Code repository
+- Do not commit unless I explicitly ask you to. A prior commit instruction does not carry over — ask again, or wait for me to ask, before every subsequent commit.
 - Never commit any files having secrets - exclude them and warn me about their existence.
 
 ## Prerequisites setup
