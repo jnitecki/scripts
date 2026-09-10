@@ -19,7 +19,9 @@ sketches to be refined when those platforms get their first script.
 2. Decide whether to check at all this run: an **implicit** run (none of
    `--upgrade-type`/`--upgrade-level`/`--upgrade-check`/`--upgrade-only`
    given) is gated by a cooldown cache; any **explicit** upgrade-related
-   flag always forces a fresh check.
+   flag always forces a fresh check. Whether a check happened, and what it
+   found, is always surfaced in the startup banner unless self-upgrade is
+   disabled outright — see section 10.
 3. Discover every matching release tag for *this exact* script (matched by
    language + script name), without requiring `git` on the machine running
    the script, and keep the ones at or above the effective release level
@@ -248,6 +250,31 @@ it's proven to work:
 - For `--upgrade-only`, there is no "actual work" to trial-run (see section
   12) — validated candidates are persisted directly instead.
 
+**Persist-outcome reporting.** The banner note printed before a trial run
+(section 10) necessarily describes only what's being *attempted* — it
+prints before that run's own outcome is known, and before persistence is
+even attempted. A trial run's real work can succeed (exit `0`) while
+the persist step itself still fails afterward (e.g. the `mv` for
+`replacement`, or the rewrite for `overwrite` — full disk, a permission
+change mid-run, etc.). This is a distinct, later outcome that section 9's
+pre-trial failure handling does not cover (that section is about failures
+*before* a candidate is trusted enough to run at all), so it needs its own
+reporting: once a trial run exits `0` and persistence is attempted, whoever
+performs that persist step prints one more line — after all of the trial
+run's own output, to stderr, never affecting the invocation's exit code
+(still the trial run's own, per section 9) — stating whether it succeeded:
+```
+container-upgrade: upgrade to v1.1.0 applied (replacement)
+container-upgrade: upgrade to v1.1.0 failed to persist (replacement): could not rename temp file — will retry next run
+```
+This line does not apply to every mode: `link` mode persists *before* its
+trial run (section 7), so a persist failure there is already reported as a
+pre-trial `check_failed` banner note (section 9), not this end-of-run line;
+`memory` mode never persists anything by design — its trial-run banner note
+already says "this run only", so there is nothing further to report. A
+failure to determine or print this line is not itself an upgrade failure,
+by the same best-effort principle as the rest of this convention.
+
 ### 9. Failure handling & fallback
 A failure at the check, download, parse-validation, or content-hash-match
 step (section 5) — i.e. before any candidate has been executed for real:
@@ -290,17 +317,23 @@ happened.
 
 Printed by whichever process ends up doing the script's real work this
 invocation:
-- The **original** process, when nothing eligible was found, upgrading is
-  disabled, or the check/download/parse/hash-match step failed (section 9)
-  — i.e. no candidate was ever trusted enough to run.
+- The **original** process, when no candidate was ever trusted enough to
+  run: the check was skipped this run under the cooldown cache (section
+  14), nothing eligible was found once checked, or the
+  check/download/parse/hash-match step failed (section 9) — or, with no
+  note at all, when self-upgrade is disabled outright (`--upgrade-type
+  none` / `--no-autoupdate`), since there's nothing to report in that case.
 - The **candidate** itself, once selected and validated, printing its own
   banner (as the new version) before its trial run — regardless of whether
   that run goes on to succeed or fail, since the note only describes what's
-  being attempted, not a settled outcome.
+  being attempted, not a settled outcome (see section 8's "Persist-outcome
+  reporting" for how that settled outcome is reported once known).
 
 Examples:
 ```
 container-upgrade v1.0.7
+container-upgrade v1.0.7 (upgrade not checked: cooldown active)
+container-upgrade v1.0.7 (no upgrade available)
 container-upgrade v1.0.7 (upgrade check failed: could not reach github.com)
 container-upgrade v1.0.7 (fetched v1.1.0 failed to parse — running v1.0.7)
 container-upgrade v1.0.7 (fetched v1.1.0, content hash mismatch — running v1.0.7)
@@ -308,9 +341,14 @@ container-upgrade v1.1.0 (self-upgrading from v1.0.7 via replacement)
 container-upgrade v1.1.0 (self-upgrading from v1.0.7 via link, running from cache)
 container-upgrade v1.1.0 (self-upgrading from v1.0.7 via memory, this run only)
 ```
-The last three are printed by the candidate at its own startup, identically
-whether its subsequent real-work run succeeds (and is then persisted,
-silently) or fails (nothing persists — see section 9's trial-run handling).
+The bare first line (no parenthetical at all) is now reserved for exactly
+one case: self-upgrade disabled for this run. Every other reachable outcome
+gets a note, so the banner line alone always tells you whether a check
+happened and what it found. The last three are printed by the candidate at
+its own startup, identically whether its subsequent real-work run succeeds
+or fails — see section 8's "Persist-outcome reporting" for the separate
+line reporting what happened once that run's own outcome, and the persist
+attempt that follows a successful one, are actually known.
 
 ### 11. `--upgrade-check`
 Discovery only — never downloads, applies, or runs the script's real work.

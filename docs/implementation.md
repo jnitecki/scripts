@@ -231,6 +231,22 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   `--upgrade-check`+`--upgrade-only`) rejects immediately with a clear
   error, per the repo-wide unrecognized-option convention extended to
   option combinations here.
+- **Banner-note coverage & persist-outcome reporting**: `upgrade_banner_note`
+  now also covers `not_checked` (cooldown not elapsed on an implicit run)
+  and `no_upgrade` (checked, nothing newer at the effective level) —
+  previously both left the banner bare, indistinguishable from self-upgrade
+  being disabled outright, which is now the only case with no note.
+  `upgrade_prepare_candidate` sets the latter itself so `upgrade_only_main`'s
+  own fallback text for "nothing to report" became dead code and was
+  removed — `UPGRADE_BANNER_NOTE` is now unconditionally set on every
+  failure path. Separately, `upgrade_main`'s `replacement`/`overwrite`
+  branches now report the persist step's own outcome (a plain `mv`/rewrite,
+  which can still fail after a successful trial run) via `log`/`err`, one
+  line printed after the trial run's own output — this never changes
+  `$code`, which the branch still `exit`s with unconditionally. `link` and
+  `memory` need no equivalent: `link` persists *before* its trial run (a
+  failure there is already a pre-trial `check_failed` note), and `memory`
+  never persists at all.
 - **Verified against the live remote**: `--upgrade-check` and a full
   ordinary run (real trial execution, including actual `podman` container
   inspection on the machine this was tested on) were exercised end-to-end

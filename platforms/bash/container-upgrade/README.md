@@ -97,6 +97,17 @@ upgrade-related flags — any of the flags above always checks fresh. Use
 `--upgrade-check` to see what would happen without changing anything, or
 `--upgrade-only` to perform just the upgrade and exit.
 
+The startup line always says what happened with the check — checked and
+found nothing newer, skipped this run because it was still within the
+20-minute cooldown, upgrading to a newer version, or the check itself
+failing — except when self-upgrade is disabled outright
+(`--upgrade-type none` / `--no-autoupdate`), the only case with no note at
+all. When an upgrade is actually applied (replacement/overwrite), a
+further line after the run reports whether persisting it succeeded —
+separately from the run itself succeeding, since the two can differ (e.g.
+the run succeeds but writing the upgraded file back fails); either way, it
+never changes this invocation's own exit code.
+
 ## What gets reconstructed
 
 Name, hostname (if overridden), user, workdir (if overridden), env vars

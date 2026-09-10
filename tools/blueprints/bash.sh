@@ -290,6 +290,8 @@ upgrade_persist_link() {
 # --- section 10: startup banner note text -----------------------------------
 upgrade_banner_note() {
   case "$1" in
+    not_checked)   printf ' (upgrade not checked: cooldown active)' ;;
+    no_upgrade)    printf ' (no upgrade available)' ;;
     check_failed)  printf ' (upgrade check failed: %s)' "$2" ;;
     parse_failed)  printf ' (fetched v%s failed to parse - running v%s)' "$2" "$3" ;;
     hash_mismatch) printf ' (fetched v%s, content hash mismatch - running v%s)' "$2" "$3" ;;
@@ -361,7 +363,11 @@ upgrade_banner_note() {
 #   # in the caller's scope; returns 1 with UPGRADE_BANNER_NOTE set on any
 #   # failure, exactly as upgrade_main's inline version does (see below) -
 #   # in a real adopting script this logic is a single shared function rather
-#   # than duplicated between the two callers.
+#   # than duplicated between the two callers. Discovery succeeding but
+#   # finding nothing eligible (nothing at the effective level, or nothing
+#   # newer than $SCRIPT_VERSION) is also a "failure" by this function's
+#   # contract: set UPGRADE_BANNER_NOTE via `upgrade_banner_note no_upgrade`
+#   # and return 1, same as any other pre-trial outcome (section 10).
 #   :
 # }
 #
@@ -392,13 +398,15 @@ upgrade_banner_note() {
 #   [ -n "$UPGRADE_TYPE" ] && explicit=1
 #   [ -n "$UPGRADE_LEVEL" ] && explicit=1
 #   local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/${SCRIPT_LANG}_${SCRIPT_NAME}.state"
-#   if [ "$explicit" = "0" ]; then
-#     upgrade_cooldown_elapsed "$cache_file" || return 0
+#   if [ "$explicit" = "0" ] && ! upgrade_cooldown_elapsed "$cache_file"; then
+#     UPGRADE_BANNER_NOTE=$(upgrade_banner_note not_checked)
+#     return 0
 #   fi
 #
 #   # ... discover/download/validate via upgrade_prepare_candidate (sets
 #   # $latest, $mode, $content) ...
-#   # On any pre-trial failure: set UPGRADE_BANNER_NOTE and `return 0`
+#   # On any pre-trial failure (including "nothing eligible" - see that
+#   # function's own comment above): set UPGRADE_BANNER_NOTE and `return 0`
 #   # (falls back to this process doing its own real work) - never `exit`.
 #
 #   export CONTAINER_UPGRADE_APPLIED_FROM="$SCRIPT_VERSION"
@@ -407,12 +415,30 @@ upgrade_banner_note() {
 #     replacement)
 #       local tmp; tmp=$(upgrade_write_temp_sibling "$content" "$SCRIPT_PATH") || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
 #       "$tmp" "$@"; local code=$?
-#       [ "$code" -eq 0 ] && upgrade_persist_replacement "$tmp" "$SCRIPT_PATH" || rm -f "$tmp"
+#       if [ "$code" -eq 0 ]; then
+#         # Persist-outcome reporting (section 8): the trial run's own output
+#         # already printed; this is a separate line, after it, stating
+#         # whether the persist step itself (a plain `mv`, which can still
+#         # fail - full disk, a permission change mid-run) succeeded. Never
+#         # changes $code.
+#         if upgrade_persist_replacement "$tmp" "$SCRIPT_PATH"; then
+#           printf '%s: upgrade to v%s applied (replacement)\n' "$SCRIPT_NAME" "$latest" >&2
+#         else
+#           rm -f "$tmp"
+#           printf '%s: upgrade to v%s failed to persist (replacement): could not rename temp file - will retry next run\n' "$SCRIPT_NAME" "$latest" >&2
+#         fi
+#       fi
 #       exit "$code"   # candidate's real work already ran either way - no retry, see section 9
 #       ;;
 #     overwrite)
 #       bash -c "$content" -- "$@"; local code=$?
-#       [ "$code" -eq 0 ] && upgrade_persist_overwrite "$content" "$SCRIPT_PATH"
+#       if [ "$code" -eq 0 ]; then
+#         if upgrade_persist_overwrite "$content" "$SCRIPT_PATH"; then
+#           printf '%s: upgrade to v%s applied (overwrite)\n' "$SCRIPT_NAME" "$latest" >&2
+#         else
+#           printf '%s: upgrade to v%s failed to persist (overwrite): could not rewrite %s - will retry next run\n' "$SCRIPT_NAME" "$latest" "$SCRIPT_PATH" >&2
+#         fi
+#       fi
 #       exit "$code"
 #       ;;
 #     link)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.1.1
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -85,6 +85,20 @@
 #           is now 20 minutes and only gates a fully implicit invocation -
 #           any explicit upgrade-related flag always checks fresh, so
 #           --force-update-check is removed as redundant.
+#   1.1.1 - the startup banner now also notes when the check was skipped
+#           under the cooldown cache ("upgrade not checked: cooldown
+#           active") and when a check ran but found nothing newer ("no
+#           upgrade available") - previously both printed a bare banner
+#           indistinguishable from self-upgrade being disabled outright,
+#           which now remains the only bare-banner case. Separately, since
+#           a trial run succeeding doesn't guarantee the persist step
+#           after it succeeds too (e.g. the replacement mv, or the
+#           overwrite rewrite, can still fail on its own), that outcome is
+#           now reported in its own line after the trial run's output
+#           ("upgrade to vX.Y.Z applied (mode)" / "... failed to persist
+#           (mode): <reason> - will retry next run") - it never changes
+#           this invocation's exit code, which still reflects only the
+#           trial run's own result.
 #
 # Iterates running containers, groups them by image, pulls each unique
 # image once, and for every container whose image actually changed (or
@@ -206,14 +220,18 @@
 # Self-upgrade: on every invocation other than --help (and unless
 # --upgrade-type none / --no-autoupdate is given), the script checks
 # github.com/jnitecki/scripts for a newer release of itself and, if
-# eligible, upgrades - see the version-history entry for 1.1.0 above for
-# the full behavior (apply modes, --upgrade-level, --upgrade-check,
-# --upgrade-only). A successful upgrade actually runs this invocation's
-# real container work under the new version before persisting anything;
-# that new version's own startup line is what you see, noting it self-
-# upgraded. This never aborts the run on its own and never changes the
-# exit code beyond what the real work itself determines; a failed check
-# is noted on the (old version's) startup line instead.
+# eligible, upgrades - see the version-history entries for 1.1.0/1.1.1
+# above for the full behavior (apply modes, --upgrade-level,
+# --upgrade-check, --upgrade-only). A successful upgrade actually runs
+# this invocation's real container work under the new version before
+# persisting anything; that new version's own startup line is what you
+# see, noting it self-upgraded. This never aborts the run on its own and
+# never changes the exit code beyond what the real work itself determines.
+# The startup line always reports the upgrade-check outcome - checked and
+# nothing newer, skipped under the cooldown, or a failed check - except
+# when self-upgrade is disabled outright, the one case with no note at
+# all. After a successful trial run, one further line reports whether
+# persisting it (separately from running it) also succeeded.
 #
 # Output: errors (failed pulls, failed reconstructions, failed starts,
 # config mismatches, rollbacks, and any container ending up still broken)
@@ -631,6 +649,8 @@ upgrade_persist_link() {
 # --- section 10: startup banner note text -----------------------------------
 upgrade_banner_note() {
   case "$1" in
+    not_checked)   printf ' (upgrade not checked: cooldown active)' ;;
+    no_upgrade)    printf ' (no upgrade available)' ;;
     check_failed)  printf ' (upgrade check failed: %s)' "$2" ;;
     parse_failed)  printf ' (fetched v%s failed to parse - running v%s)' "$2" "$3" ;;
     hash_mismatch) printf ' (fetched v%s, content hash mismatch - running v%s)' "$2" "$3" ;;
@@ -665,8 +685,10 @@ upgrade_prepare_candidate() {
   local effective_level="${UPGRADE_LEVEL:-$(upgrade_version_level "$SCRIPT_VERSION")}"
   local latest
   latest=$(upgrade_highest_at_level "$versions" "$effective_level")
-  [[ -n "$latest" ]] || return 1
-  upgrade_version_gt "$latest" "$SCRIPT_VERSION" || return 1
+  if [[ -z "$latest" ]] || ! upgrade_version_gt "$latest" "$SCRIPT_VERSION"; then
+    UPGRADE_BANNER_NOTE=$(upgrade_banner_note no_upgrade)
+    return 1
+  fi
 
   local cache_dir cache_file mode
   cache_dir=$(upgrade_cache_dir "$SCRIPT_LANG" "$SCRIPT_NAME")
@@ -751,15 +773,11 @@ upgrade_check_main() {
 # validated candidate is persisted directly.
 upgrade_only_main() {
   if ! upgrade_prepare_candidate; then
+    # upgrade_prepare_candidate always sets UPGRADE_BANNER_NOTE on failure
+    # (no_upgrade/check_failed/parse_failed/hash_mismatch - section 10) -
+    # strip its leading space and surrounding parens for a standalone line.
     printf '%s v%s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
-    if [[ -n "$UPGRADE_BANNER_NOTE" ]]; then
-      # UPGRADE_BANNER_NOTE is " (upgrade check failed: ...)" / " (fetched
-      # vX failed to parse ...)" / " (fetched vX, content hash mismatch ...)"
-      # - strip its leading space and surrounding parens for a standalone line.
-      printf '%s\n' "${UPGRADE_BANNER_NOTE# (}" | sed 's/)$//'
-    else
-      printf 'No upgrade available\n'
-    fi
+    printf '%s\n' "${UPGRADE_BANNER_NOTE# (}" | sed 's/)$//'
     exit 0
   fi
 
@@ -827,8 +845,9 @@ upgrade_main() {
   [[ -n "$UPGRADE_TYPE" ]] && explicit=1
   [[ -n "$UPGRADE_LEVEL" ]] && explicit=1
   local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/${SCRIPT_LANG}_${SCRIPT_NAME}.state"
-  if [[ "$explicit" == "0" ]]; then
-    upgrade_cooldown_elapsed "$cache_file" || return 0
+  if [[ "$explicit" == "0" ]] && ! upgrade_cooldown_elapsed "$cache_file"; then
+    UPGRADE_BANNER_NOTE=$(upgrade_banner_note not_checked)
+    return 0
   fi
 
   upgrade_prepare_candidate || return 0
@@ -852,7 +871,17 @@ upgrade_main() {
       fi
       "$tmp" "$@"; code=$?
       if [[ "$code" -eq 0 ]]; then
-        upgrade_persist_replacement "$tmp" "$SCRIPT_PATH"
+        # Persist-outcome reporting (section 8): the trial run's own output
+        # already printed above; this is a separate line stating whether
+        # the persist step itself (a plain mv, which can still fail on its
+        # own - full disk, a permission change mid-run) succeeded. Never
+        # changes $code.
+        if upgrade_persist_replacement "$tmp" "$SCRIPT_PATH"; then
+          log "Upgrade to v${latest} applied (replacement)"
+        else
+          rm -f "$tmp"
+          err "Upgrade to v${latest} failed to persist (replacement): could not rename temp file - will retry next run"
+        fi
       else
         rm -f "$tmp"
       fi
@@ -863,7 +892,13 @@ upgrade_main() {
     overwrite)
       local code
       bash -c "$content" -- "$@"; code=$?
-      [[ "$code" -eq 0 ]] && upgrade_persist_overwrite "$content" "$SCRIPT_PATH"
+      if [[ "$code" -eq 0 ]]; then
+        if upgrade_persist_overwrite "$content" "$SCRIPT_PATH"; then
+          log "Upgrade to v${latest} applied (overwrite)"
+        else
+          err "Upgrade to v${latest} failed to persist (overwrite): could not rewrite ${SCRIPT_PATH} - will retry next run"
+        fi
+      fi
       exit "$code"
       ;;
     link)
@@ -893,7 +928,7 @@ upgrade_main() {
 # =============================================================================
 
 usage() {
-  sed -n '2,223p' "$0"
+  sed -n '2,240p' "$0"
   exit 1
 }
 
