@@ -258,3 +258,40 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   unit-tested in isolation (including the `link`/`memory`/ceiling-capping
   cases, which the live remote's single stable tag couldn't exercise on
   its own).
+- **Content-hash capture bug (fixed in 1.1.2)**: `content=$(upgrade_download
+  ...)` silently stripped the download's trailing newline (command
+  substitution's documented behavior), so `upgrade_hash_prefix "$content"`
+  hashed one byte fewer than `tools/git-hooks/post-commit.sh`'s
+  `file_hash_prefix` did (`git show ref:path | sha1sum`, newline intact) —
+  every check against every real tag failed with a false content-hash
+  mismatch, caught only once a live check against the real `v1.1.1` tag was
+  run (earlier isolated testing never round-tripped through the lossy
+  capture). Fixed by having `upgrade_download` append a `\x01` sentinel
+  after its real output and having the caller strip it back off
+  (`"${content%$'\x01'}"`) instead of relying on the capture to preserve
+  the tail itself. The same pattern existed in the `link`-mode cache-hit
+  check (`upgrade_hash_prefix "$(cat "$cache_file")"`) — replaced with the
+  new `upgrade_hash_prefix_file`, which hashes a file directly and so has
+  no capture step to lose bytes to in the first place.
+- **Persist-time re-verification (new in 1.1.2)**: `upgrade_verify_disk_hash`
+  re-hashes the actual on-disk bytes (via `upgrade_hash_prefix_file`)
+  against `$UPGRADE_TAG_HASH` (now exposed by `upgrade_prepare_candidate`
+  alongside `UPGRADE_LATEST`/`UPGRADE_SELECTED_MODE`/
+  `UPGRADE_CANDIDATE_CONTENT`, so it doesn't need re-fetching) right before
+  each file-touching mode's own commit point: `replacement` re-hashes the
+  temp file right before its `mv`; `overwrite` has no temp file to reuse
+  (the trial runs `$content` directly via `bash -c`, and its directory
+  isn't writable by definition), so `upgrade_write_temp_scratch` writes a
+  verify-only copy to a generic `mktemp` location purely to get real bytes
+  to re-hash, discarded either way afterward; `link` re-hashes the cache
+  file immediately after writing it, since that mode persists *before* its
+  trial run rather than after. A mismatch is reported via the existing
+  persist-outcome line (`replacement`/`overwrite`, post-trial — `$code`
+  unaffected) or as a pre-trial `hash_mismatch` banner note (`link`,
+  same as the download-time check). `memory` is exempt — it never persists
+  anything. End-to-end re-verified live: a scratch copy downgraded to
+  `v1.1.0` and run with `--upgrade-only` against the real `v1.1.1` tag
+  applied cleanly with no mismatch reported, and the resulting file came
+  out byte-identical to the tag's raw content (confirmed via `diff`),
+  trailing newline included — fixing, as a side effect, the fact that
+  every self-upgraded file was previously missing its final newline too.

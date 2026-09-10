@@ -188,11 +188,27 @@ upgrade_cache_file() {
 }
 
 # --- section 5: download the candidate + syntax-only validation ------------
+
+# args: $1=owner $2=repo $3=lang $4=name $5=version -> prints content on
+# stdout, followed by a single sentinel byte (\x01, never legitimately
+# part of a bash script's source). PITFALL (this convention's own
+# reference implementation shipped with this bug - see section 5's
+# "Implementation note" in the convention doc): a caller capturing this
+# via plain `content=$(upgrade_download ...)` would otherwise silently
+# lose every trailing newline to command substitution's stripping, which
+# permanently mismatches the release-tag hook's declared hash (computed
+# off `git show`'s output, newline intact) even though the download itself
+# is perfectly fine. The sentinel defeats that stripping; the caller
+# recovers the byte-exact original with `"${captured%$'\x01'}"`. Exit
+# status is curl's own, not printf's.
 upgrade_download() {
-  # args: $1=owner $2=repo $3=lang $4=name $5=version -> prints content on stdout
-  local owner="$1" repo="$2" lang="$3" name="$4" version="$5"
+  # args: $1=owner $2=repo $3=lang $4=name $5=version
+  local owner="$1" repo="$2" lang="$3" name="$4" version="$5" rc
   curl -fsS --max-time "${UPGRADE_TIMEOUT:-10}" \
     "https://raw.githubusercontent.com/${owner}/${repo}/${lang}/${name}/v${version}/platforms/${lang}/${name}/${name}.sh"
+  rc=$?
+  printf '\x01'
+  return "$rc"
 }
 
 upgrade_validate_parse() {
@@ -232,6 +248,38 @@ upgrade_hash_prefix() {
   printf '%s' "${full:0:12}"
 }
 
+# args: $1=file path -> prints the first 12 hex chars of its plain SHA-1,
+# or nothing if neither sha1sum nor shasum is available, or the file can't
+# be read. Hashes the file directly (no bash-variable round-trip), so
+# unlike upgrade_hash_prefix on a captured variable, there is no risk of
+# command substitution silently stripping trailing newlines and skewing
+# the result - same pitfall upgrade_download's sentinel byte works around,
+# but here avoided by not going through a variable at all. Used for a
+# `link`-mode cache-hit's own hash check (section 7) and for the
+# persist-time re-verification below (section 6).
+upgrade_hash_prefix_file() {
+  local path="$1" full
+  if command -v sha1sum >/dev/null 2>&1; then
+    full=$(sha1sum "$path" 2>/dev/null | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    full=$(shasum -a 1 "$path" 2>/dev/null | cut -d' ' -f1)
+  else
+    return 0
+  fi
+  printf '%s' "${full:0:12}"
+}
+
+# args: $1=file path $2=expected 12-hex-char hash (may be empty - nothing
+# to compare against, same "not fail-closed" treatment as section 5's
+# check) -> 0 if the file's on-disk hash matches (or there's nothing to
+# verify), 1 on an actual computed mismatch.
+upgrade_verify_disk_hash() {
+  local path="$1" expected="$2" actual
+  [ -n "$expected" ] || return 0
+  actual=$(upgrade_hash_prefix_file "$path")
+  [ -z "$actual" ] || [ "$actual" = "$expected" ]
+}
+
 # --- section 14: cooldown cache (implicit invocations only) ----------------
 # args: $1=cache_file -> 0 (true) if the cooldown window has elapsed, or
 # there's no cache yet.
@@ -260,6 +308,24 @@ upgrade_write_temp_sibling() {
   # `chmod --reference` is GNU-only and fails silently under macOS's BSD
   # chmod (bash-3.2 target) - carry over just the executable bit explicitly.
   [ -x "$script_path" ] && chmod +x "$tmp" 2>/dev/null
+  printf '%s' "$tmp"
+}
+
+# args: $1=content -> writes content to a fresh file in a generic writable
+# temp location (unlike upgrade_write_temp_sibling, not required to be
+# next to script_path - "overwrite" mode's whole precondition is that
+# script_path's own directory is *not* writable, so a sibling temp file
+# isn't an option there). Used only to get real on-disk bytes to re-verify
+# (upgrade_verify_disk_hash) before the actual overwrite commits - see
+# "Persist-time re-verification" below. Prints the temp file's path, or
+# nothing + return 1 on failure.
+upgrade_write_temp_scratch() {
+  local content="$1" tmp
+  tmp=$(mktemp 2>/dev/null) || return 1
+  if ! printf '%s' "$content" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
   printf '%s' "$tmp"
 }
 
@@ -359,26 +425,44 @@ upgrade_banner_note() {
 # --- self-upgrade: shared discovery + download + validate, used by both ----
 # --- upgrade_only_main and upgrade_main below -------------------------------
 # upgrade_prepare_candidate() {
-#   # Sets $latest, $mode, $content (possibly empty on a link-mode cache hit)
-#   # in the caller's scope; returns 1 with UPGRADE_BANNER_NOTE set on any
-#   # failure, exactly as upgrade_main's inline version does (see below) -
-#   # in a real adopting script this logic is a single shared function rather
-#   # than duplicated between the two callers. Discovery succeeding but
-#   # finding nothing eligible (nothing at the effective level, or nothing
-#   # newer than $SCRIPT_VERSION) is also a "failure" by this function's
-#   # contract: set UPGRADE_BANNER_NOTE via `upgrade_banner_note no_upgrade`
-#   # and return 1, same as any other pre-trial outcome (section 10).
+#   # Sets $latest, $mode, $content (possibly empty on a link-mode cache
+#   # hit), and $tag_hash (the winning tag's declared hash, possibly empty -
+#   # reused by both callers below for persist-time re-verification instead
+#   # of re-fetching it) in the caller's scope; returns 1 with
+#   # UPGRADE_BANNER_NOTE set on any failure, exactly as upgrade_main's
+#   # inline version does (see below) - in a real adopting script this logic
+#   # is a single shared function rather than duplicated between the two
+#   # callers. Discovery succeeding but finding nothing eligible (nothing at
+#   # the effective level, or nothing newer than $SCRIPT_VERSION) is also a
+#   # "failure" by this function's contract: set UPGRADE_BANNER_NOTE via
+#   # `upgrade_banner_note no_upgrade` and return 1, same as any other
+#   # pre-trial outcome (section 10). A link-mode cache-hit check compares
+#   # via `upgrade_hash_prefix_file "$cache_file"`, never
+#   # `upgrade_hash_prefix "$(cat "$cache_file")"` - see section 5's
+#   # "Implementation note" for why that capture-then-hash form is broken.
 #   :
 # }
 #
 # --- self-upgrade: --upgrade-only (section 12) - sketch --------------------
 # upgrade_only_main() {
 #   # ... discover/download/validate via upgrade_prepare_candidate ...
-#   # ... then persist directly, no trial run:
-#   #   replacement -> upgrade_write_temp_sibling + upgrade_persist_replacement
-#   #   overwrite   -> upgrade_persist_overwrite
-#   #   link        -> upgrade_persist_link (already the persist step itself)
+#   # ... then persist directly, no trial run - each mode's write is
+#   # re-verified against $tag_hash (upgrade_verify_disk_hash) before it's
+#   # treated as committed, same "Persist-time re-verification" (section 6)
+#   # upgrade_main applies below, just with no trial run to have already
+#   # produced a file for replacement/overwrite to reuse:
+#   #   replacement -> upgrade_write_temp_sibling, verify, then
+#   #                  upgrade_persist_replacement
+#   #   overwrite   -> upgrade_write_temp_scratch (a verify-only copy, since
+#   #                  there's no temp file otherwise), verify, then
+#   #                  upgrade_persist_overwrite, then discard the scratch
+#   #   link        -> upgrade_persist_link, then verify the cache file
+#   #                  itself (already the persist step - link has no
+#   #                  separate "commit" moment to check before)
 #   #   memory      -> nothing to persist; report that plainly
+#   #   A verify failure here reports the mismatch and `exit 1` - unlike
+#   #   upgrade_main's trial-run flow, nothing has run yet, so there's no
+#   #   trial exit code to preserve.
 #   exit 0
 # }
 #
@@ -404,7 +488,7 @@ upgrade_banner_note() {
 #   fi
 #
 #   # ... discover/download/validate via upgrade_prepare_candidate (sets
-#   # $latest, $mode, $content) ...
+#   # $latest, $mode, $content, $tag_hash) ...
 #   # On any pre-trial failure (including "nothing eligible" - see that
 #   # function's own comment above): set UPGRADE_BANNER_NOTE and `return 0`
 #   # (falls back to this process doing its own real work) - never `exit`.
@@ -416,12 +500,16 @@ upgrade_banner_note() {
 #       local tmp; tmp=$(upgrade_write_temp_sibling "$content" "$SCRIPT_PATH") || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
 #       "$tmp" "$@"; local code=$?
 #       if [ "$code" -eq 0 ]; then
-#         # Persist-outcome reporting (section 8): the trial run's own output
-#         # already printed; this is a separate line, after it, stating
-#         # whether the persist step itself (a plain `mv`, which can still
-#         # fail - full disk, a permission change mid-run) succeeded. Never
-#         # changes $code.
-#         if upgrade_persist_replacement "$tmp" "$SCRIPT_PATH"; then
+#         # Persist-time re-verification (section 6): re-hash the actual
+#         # bytes on disk - not $content again, which wouldn't catch
+#         # anything new - right before they become the live script. Then
+#         # persist-outcome reporting (section 8): the trial run's own
+#         # output already printed; this is a separate line, after it,
+#         # stating what happened. Neither ever changes $code.
+#         if ! upgrade_verify_disk_hash "$tmp" "$tag_hash"; then
+#           rm -f "$tmp"
+#           printf '%s: upgrade to v%s failed to persist (replacement): on-disk content hash mismatch after trial run - not applied, will retry next run\n' "$SCRIPT_NAME" "$latest" >&2
+#         elif upgrade_persist_replacement "$tmp" "$SCRIPT_PATH"; then
 #           printf '%s: upgrade to v%s applied (replacement)\n' "$SCRIPT_NAME" "$latest" >&2
 #         else
 #           rm -f "$tmp"
@@ -433,7 +521,21 @@ upgrade_banner_note() {
 #     overwrite)
 #       bash -c "$content" -- "$@"; local code=$?
 #       if [ "$code" -eq 0 ]; then
-#         if upgrade_persist_overwrite "$content" "$SCRIPT_PATH"; then
+#         # Persist-time re-verification (section 6): "overwrite" has no
+#         # temp file of its own (the trial runs $content directly, never
+#         # touching disk) and can't write one next to $SCRIPT_PATH either -
+#         # that's the mode's whole precondition - so upgrade_write_temp_
+#         # scratch gets real on-disk bytes to re-hash from elsewhere. A
+#         # failure to even get that scratch copy just skips the check
+#         # (best-effort), not a mismatch.
+#         local scratch mismatch=0
+#         if scratch=$(upgrade_write_temp_scratch "$content"); then
+#           upgrade_verify_disk_hash "$scratch" "$tag_hash" || mismatch=1
+#           rm -f "$scratch"
+#         fi
+#         if [ "$mismatch" = "1" ]; then
+#           printf '%s: upgrade to v%s failed to persist (overwrite): on-disk content hash mismatch after trial run - not applied, will retry next run\n' "$SCRIPT_NAME" "$latest" >&2
+#         elif upgrade_persist_overwrite "$content" "$SCRIPT_PATH"; then
 #           printf '%s: upgrade to v%s applied (overwrite)\n' "$SCRIPT_NAME" "$latest" >&2
 #         else
 #           printf '%s: upgrade to v%s failed to persist (overwrite): could not rewrite %s - will retry next run\n' "$SCRIPT_NAME" "$latest" "$SCRIPT_PATH" >&2
@@ -444,8 +546,23 @@ upgrade_banner_note() {
 #     link)
 #       local cache_file2; cache_file2=$(upgrade_cache_file "$SCRIPT_LANG" "$SCRIPT_NAME")
 #       # $content is empty on a cache-hit (upgrade_prepare_candidate already
-#       # confirmed the cached file's hash matches - nothing new to write).
-#       [ -n "$content" ] && { upgrade_persist_link "$content" "$cache_file2" || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write cache"); return 0; }; }
+#       # confirmed the cached file's hash matches - nothing new to write or
+#       # re-verify).
+#       if [ -n "$content" ]; then
+#         upgrade_persist_link "$content" "$cache_file2" || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write cache"); return 0; }
+#         # Persist-time re-verification (section 6): unlike replacement/
+#         # overwrite, "link" persists *before* its trial run (section 7),
+#         # so this runs here instead - before the cache file is ever
+#         # trusted enough to execute. A mismatch is therefore still a
+#         # pre-trial failure (section 9), not a post-trial one: fall back
+#         # via `return 0`, never `exit`.
+#         if ! upgrade_verify_disk_hash "$cache_file2" "$tag_hash"; then
+#           rm -f "$cache_file2"
+#           unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+#           UPGRADE_BANNER_NOTE=$(upgrade_banner_note hash_mismatch "$latest" "$SCRIPT_VERSION")
+#           return 0
+#         fi
+#       fi
 #       "$cache_file2" "$@"; local code=$?
 #       [ "$code" -ne 0 ] && rm -f "$cache_file2"   # don't leave a broken version cached
 #       exit "$code"

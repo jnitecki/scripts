@@ -180,6 +180,29 @@ trusted at all:
   computed mismatch (both sides produced a hash and they differ) counts as
   a failure, handled per section 9 the same way a parse failure is.
 
+**Implementation note — a real bug this convention's own bash reference
+implementation shipped with.** Capturing a download via plain
+`content=$(curl ...)` looks lossless but isn't: command substitution
+unconditionally strips every trailing newline from what it captures.
+Since [[release-tag-hook]] computes its declared hash straight off `git
+show`'s output — the tagged file's exact bytes, trailing newline included
+— a client that captures its download the naive way ends up hashing one
+byte fewer than the hook did, and *every* check against *every* tag then
+fails with a content-hash mismatch, deterministically, regardless of how
+healthy the actual release is (this shipped undetected until a live check
+against a real tag surfaced it — the earlier isolated testing that
+verified this section's logic used content built into the test itself,
+which never round-tripped through a lossy capture). The fix: have the
+download function append a single sentinel byte (never legitimately part
+of a script's source, e.g. `\x01`) after its real output, so the caller
+recovers the byte-exact original with `"${captured%$'\x01'}"` instead of
+silently losing the tail to the capture itself. The same pitfall applies
+anywhere an already-on-disk file gets re-read through a variable (e.g. a
+`link`-mode cache hit, section 7) — hash the file directly there instead
+of capturing its content first (see section 6's "Persist-time
+re-verification", which does exactly that for a different reason: not
+avoiding this pitfall a second time, but verifying the disk write itself).
+
 ### 6. Apply modes and the fallback cascade
 Four apply modes, strongest to weakest, each gated by a filesystem
 precondition:
@@ -206,6 +229,43 @@ minimum: e.g. `--upgrade-type link` never escalates to `replacement` or
 `overwrite` even when those would in fact be possible on that machine — it
 only ever attempts `link`, falling back further to `memory` if even the
 cache directory isn't writable.
+
+**Persist-time re-verification.** The content-hash check in section 5 runs
+once, against the freshly downloaded bytes, before anything is written
+anywhere — it doesn't guarantee those bytes reach disk unchanged (a write
+can itself introduce corruption, or, as this convention's own reference
+implementation demonstrated in practice, a subtler bug in how the
+downloaded bytes were captured in the first place — see section 5's
+"Implementation note"). For every apply mode that touches a real file
+(`replacement`, `overwrite`, `link` — not `memory`, which never writes
+anything), the actual on-disk bytes are hashed again, directly off the
+file rather than through a variable (so no capture-related stripping can
+skew this second check the same way), and compared against the same
+declared hash from section 5, at the point closest to that mode's own
+commit:
+- `replacement`/`overwrite`: after a successful trial run, immediately
+  before the temp-file `mv` / in-place rewrite that makes it live.
+  `overwrite` has no temp file of its own to reuse for this (its trial
+  runs the content directly, never touching disk) and can't write one
+  next to the script either — its whole precondition is that the
+  directory isn't writable — so a scratch copy is written to some other
+  writable location purely to get real on-disk bytes to re-hash from.
+- `link`: immediately after writing the cache file, before it is ever
+  trusted enough to run — this mode persists *before* its trial run
+  (section 7), so there's no later "before the `mv`" moment the way there
+  is for the other two.
+
+A mismatch here is handled the same as any other outcome reachable at that
+stage: for `replacement`/`overwrite` (post-trial), nothing is persisted
+and it's reported via the persist-outcome line (section 8) without
+changing the invocation's exit code, since the trial's own work already
+succeeded; for `link` (pre-trial), it's a pre-trial failure like any other
+in section 9 — a `hash_mismatch` banner note, falling back to the
+already-loaded version. Like the section 5 check it re-verifies, this is
+best-effort: if the expected hash was itself unavailable (section 5's
+"not fail-closed" cases) or a scratch copy for `overwrite` couldn't even
+be written, there is nothing to compare against and the check is skipped,
+not treated as a failure.
 
 ### 7. The persistent cache (link mode)
 `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/<lang>/<name>/<name>.<ext>`
