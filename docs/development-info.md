@@ -2,8 +2,11 @@
 
 Master reference for contributing to this repository. See also
 `docs/requirements/` (generic conventions every script follows, plus
-per-feature requirement docs) and `docs/implementation.md` (how those
-requirements are actually implemented in practice).
+requirement docs for repo-wide tooling not specific to a single script) and
+`docs/implementation.md` (how those requirements are actually implemented
+in practice). Documentation and requirements specific to one script live
+under that script's own `platforms/<platform>/<script>/docs/` instead — see
+`docs/CONTEXT.md`'s "Per-script documentation" section.
 
 ## Git hooks
 

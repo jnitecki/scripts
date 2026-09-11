@@ -2,9 +2,10 @@
 
 ## Startup
 At the start of every task:
-1. Read docs/requirements/implemented/ to understand what exists
+1. Read docs/requirements/implemented/ to understand what exists (repo-wide/tooling features not specific to a single script)
 2. Read any relevant file in docs/requirements/pending/ for the feature being discussed
 3. Read docs/requirements/generic/ to understand generic, cross-cutting requirements that apply project-wide
+4. If the task concerns a specific script under platforms/<platform>/<script>/, also read that script's own platforms/<platform>/<script>/docs/requirements/implemented/ and pending/ (see "Per-script documentation" below)
 
 ## Rules
 - Ask questions if any details are not clear
@@ -20,6 +21,12 @@ At the start of every task:
 - The information from docs/ideas should not affect the decisions how to proceed with requirements, other than for deciding between multiple equivalent approaches.
 - Whenever a requirement, or part of one, is decided to be postponed/deferred (phase-2, "not required for v1", "out of scope for v1 pending X", etc.), record it in docs/requirements/pending/parked-requirements-list.md (name, short info, reference to where it's fully specified) at the same time. When a parked item is later implemented or formally dropped, remove its entry.
 - While planning, don't only produce the plan itself — also report in chat, for each of my requirements/suggestions/questions, how it was addressed (or why it was rejected/postponed/modified).
+
+## Per-script documentation
+- User-facing information for a specific script belongs in that script's own `platforms/<platform>/<script>/README.md` — not in root-level docs.
+- Technical documentation and requirements specific to one script (if any) belong under `platforms/<platform>/<script>/docs/` (e.g. `platforms/<platform>/<script>/docs/requirements/pending/` and `.../implemented/`), following the same pending → implemented lifecycle as the main `docs/requirements/` tree.
+- The main `docs/` directory (including `docs/requirements/`) holds only documentation and requirements that are **not** specific to a single script — repo-wide tooling (e.g. git hooks, the catalog generator), and the generic/cross-cutting conventions in `docs/requirements/generic/` that apply across scripts.
+- If a requirement affects a specific script AND also changes a generic, cross-cutting convention, split it: the script-specific requirement doc stays under that script's own `docs/`, while the generic convention itself is described in `docs/requirements/generic/`.
 
 ## Generic Requirements
 - Requirements in docs/requirements/generic/ are cross-cutting and apply project-wide, in whichever areas each one is relevant to.
