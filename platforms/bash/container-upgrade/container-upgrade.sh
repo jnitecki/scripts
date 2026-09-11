@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.2
+# Version: 1.1.3
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -118,6 +118,23 @@
 #           failed persist already was (post-trial, for replacement/
 #           overwrite) or as a pre-trial hash_mismatch banner note (link,
 #           which persists before its trial run).
+#   1.1.3 - added a restart-policy safety step around both restart
+#           strategies: a container whose restart policy is "always" is
+#           relaxed to "unless-stopped" right before it's stopped, and
+#           restored to "always" once the container ending up under the
+#           original name starts back up (or, in safe mode's
+#           fail-no-rollback path, restored on the stopped container left
+#           aside for manual recovery, since it never restarts). Without
+#           this, a container sitting stopped mid-upgrade (safe mode can
+#           leave one renamed-aside for the whole --timeout window) stays
+#           exposed to the engine's daemon/service restarting and bringing
+#           it back up on its old image out from under the upgrade - an
+#           explicit stop alone does not disable "always" the way it does
+#           "unless-stopped". Best-effort: a failure to relax or restore
+#           (e.g. an engine/version - some Podman releases - without
+#           `update --restart` support) never blocks or rolls back the
+#           actual upgrade, but is reported as its own error category in
+#           the summary with the specific detail of what failed.
 #
 # Iterates running containers, groups them by image, pulls each unique
 # image once, and for every container whose image actually changed (or
@@ -1086,7 +1103,7 @@ upgrade_main() {
 # =============================================================================
 
 usage() {
-  sed -n '2,259p' "$0"
+  sed -n '2,276p' "$0"
   exit 1
 }
 
@@ -1489,17 +1506,91 @@ check_pre_status() {
 }
 
 # ---------------------------------------------------------------------------
+# Restart-policy safety
+# ---------------------------------------------------------------------------
+#
+# A restart policy of "always" does not, by itself, bring a container back
+# after an explicit `$ENGINE stop` (which is exactly what both strategies
+# below do) while the engine's own daemon/service keeps running - only a
+# daemon/service restart (or an explicit manual start) does. But a
+# container that ends up sitting stopped for a while mid-upgrade (safe
+# mode renames it aside and can leave it there for the full --timeout
+# window, or longer still if rollback isn't attempted) is exposed to that
+# daemon-restart race: if the engine's daemon/service restarts while our
+# container sits there intentionally stopped, "always" brings it back up
+# on its old image right underneath us, while "unless-stopped" would not.
+#
+# To close that window, in both modes the targeted container's policy is
+# checked before it is stopped and, if "always", relaxed to
+# "unless-stopped" first; once the container that ends up running under
+# the original name starts back up, its policy is restored to "always"
+# (a container left stopped-aside for manual recovery - safe mode's
+# fail_no_rollback path - has its policy restored there too, even though
+# it never restarts, so it isn't left permanently downgraded from what it
+# was configured with before this script touched it).
+#
+# This is a best-effort safety step, not part of the upgrade itself: a
+# failure to relax or restore (e.g. an engine/version - some Podman
+# releases - that doesn't support `update --restart`) never blocks or
+# rolls back the actual container work, but is reported as its own error
+# category in the summary (see RESTART_POLICY_ISSUES) with the specific
+# detail of what failed and why, since a container silently left on the
+# wrong policy is a real (if secondary) problem worth surfacing.
+
+get_restart_policy() {
+  local name="$1"
+  $ENGINE inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null
+}
+
+# Sets $1's restart policy to $2. On failure, returns 1 and leaves the
+# engine's error text in RESTART_POLICY_ERROR (bash 3.2 has no other way
+# to hand back more than an exit code - see the map_* functions' header
+# comment for the same constraint elsewhere in this script).
+set_restart_policy() {
+  local name="$1" policy="$2" out
+  RESTART_POLICY_ERROR=""
+  if out=$($ENGINE update --restart="$policy" "$name" 2>&1 1>/dev/null); then
+    return 0
+  fi
+  RESTART_POLICY_ERROR="$out"
+  return 1
+}
+
+# Records a failed relax/restore as its own reported category (distinct
+# from the container's health-based RESULT) - see RESTART_POLICY_ISSUES.
+record_restart_policy_issue() {
+  local name="$1" detail="$2"
+  err "  Restart-policy safety step failed for $name: $detail"
+  RESTART_POLICY_ISSUES+=("$name: $detail")
+}
+
+# ---------------------------------------------------------------------------
 # Restart strategies
 # ---------------------------------------------------------------------------
 
 restart_simple() {
   local name="$1" run_cmd="$2"
+  local orig_policy
+  orig_policy=$(get_restart_policy "$name")
+
+  if [[ "$orig_policy" == "always" ]]; then
+    log "  [simple] Restart policy is 'always' - relaxing to 'unless-stopped' before stopping..."
+    set_restart_policy "$name" "unless-stopped" \
+      || record_restart_policy_issue "$name" "could not relax policy to 'unless-stopped' before stop: $RESTART_POLICY_ERROR"
+  fi
+
   log "  [simple] Stopping $name..."
   $ENGINE stop "$name" >/dev/null
   log "  [simple] Removing $name..."
   $ENGINE rm "$name" >/dev/null
   log "  [simple] Starting new container..."
   eval "$run_cmd"
+
+  if [[ "$orig_policy" == "always" ]]; then
+    set_restart_policy "$name" "always" \
+      || record_restart_policy_issue "$name" "could not restore policy to 'always' after start: $RESTART_POLICY_ERROR"
+  fi
+
   log "  [simple] Done."
 }
 
@@ -1515,6 +1606,7 @@ restart_safe() {
   local name="$1" run_cmd="$2" allow_rollback="$3"
   local old_name="${name}_old_$(date +%s)"
   local old_fingerprint new_fingerprint diff_output
+  local orig_policy
 
   rollback() {
     local reason="$1"
@@ -1523,11 +1615,19 @@ restart_safe() {
     $ENGINE rm -f "$name" >/dev/null 2>&1 || true
     $ENGINE rename "$old_name" "$name"
     $ENGINE start "$name" >/dev/null
+    if [[ "$orig_policy" == "always" ]]; then
+      set_restart_policy "$name" "always" \
+        || record_restart_policy_issue "$name" "could not restore policy to 'always' after rollback start: $RESTART_POLICY_ERROR"
+    fi
     log "  [safe] Rolled back, $name restored and started."
   }
 
   fail_no_rollback() {
     local reason="$1"
+    if [[ "$orig_policy" == "always" ]]; then
+      set_restart_policy "$old_name" "always" \
+        || record_restart_policy_issue "$old_name" "could not restore policy to 'always' on the stopped, left-aside container: $RESTART_POLICY_ERROR"
+    fi
     err "  [safe] $reason This container was already failing before the" \
         "upgrade, so per policy it is left on the new image rather than" \
         "rolled back. The stopped previous container remains as" \
@@ -1536,6 +1636,13 @@ restart_safe() {
 
   log "  [safe] Capturing current config fingerprint..."
   old_fingerprint=$(normalized_config "$name")
+
+  orig_policy=$(get_restart_policy "$name")
+  if [[ "$orig_policy" == "always" ]]; then
+    log "  [safe] Restart policy is 'always' - relaxing to 'unless-stopped' before stopping..."
+    set_restart_policy "$name" "unless-stopped" \
+      || record_restart_policy_issue "$name" "could not relax policy to 'unless-stopped' before stop: $RESTART_POLICY_ERROR"
+  fi
 
   log "  [safe] Stopping $name..."
   $ENGINE stop "$name" >/dev/null
@@ -1552,6 +1659,11 @@ restart_safe() {
       fail_no_rollback "New container failed to start."
       return 3
     fi
+  fi
+
+  if [[ "$orig_policy" == "always" ]]; then
+    set_restart_policy "$name" "always" \
+      || record_restart_policy_issue "$name" "could not restore policy to 'always' after start: $RESTART_POLICY_ERROR"
   fi
 
   if ! $SKIP_CONFIG_CHECK; then
@@ -1620,6 +1732,7 @@ log "Engine: $ENGINE | Mode: $MODE | Timeout: ${TIMEOUT}s | Precheck: ${PRECHECK
 # needed, they come into existence on first map_set.
 ATTEMPTED_ORDER=()
 IMAGES_UPGRADED=()
+RESTART_POLICY_ISSUES=()
 
 # --- Phase 1: snapshot each container's image and current image id -------
 for name in "${CONTAINERS[@]}"; do
@@ -1939,6 +2052,14 @@ for status in "${STATUS_ORDER[@]}"; do
     fi
   done
 done
+
+if [[ ${#RESTART_POLICY_ISSUES[@]} -gt 0 ]]; then
+  echo ""
+  err "Containers where the restart-policy safety step failed (${#RESTART_POLICY_ISSUES[@]}) - policy may not match its pre-upgrade state:"
+  for issue in "${RESTART_POLICY_ISSUES[@]}"; do
+    err "  - $issue"
+  done
+fi
 
 log "All containers checked."
 
