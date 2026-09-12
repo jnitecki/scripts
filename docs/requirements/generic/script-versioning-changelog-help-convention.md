@@ -5,7 +5,10 @@ Applies to every script in this repository, regardless of scripting/programming
 language or the platform/category directory it lives under. Builds on
 [[script-header-convention]] (the `Version:`/`Category:`/`Description:` header
 fields). See also [[script-upgrade-convention]], which extends the startup
-banner defined in section 4 below with an upgrade-check outcome note.
+banner defined in section 4 below with an upgrade-check outcome note, and
+[[script-maintenance-convention]], which supersedes or extends several
+sections below (version increment algorithm, changelog location, `--help`
+layering for self-upgrade-adopting scripts) with repo-wide process rules.
 
 ## Requirement
 
@@ -17,17 +20,18 @@ banner defined in section 4 below with an upgrade-check outcome note.
   `--version` output, etc.), it must read that value programmatically from
   the header itself rather than duplicating it in a separate constant or
   variable, so the two can never drift out of sync.
+- The precise increment algorithm (how a pre-release suffix's trailing
+  number vs. `Z` itself gets bumped) is defined in
+  [[script-maintenance-convention]] section 4, which extends this rule.
 
 ### 2. In-script version history / changelog
-- Every script's header must include a version history section immediately
-  following the `Version:`/`Category:`/`Description:` block, with one entry
-  per version bump.
-- Each entry records the version number and a concise description of what
-  changed in that version.
-- Entries are append-only: past entries are never rewritten or removed,
-  newest entry at the bottom.
-- This changelog lives inside the script itself, not in a separate
-  `CHANGELOG.md`, so a script's history always travels with the file.
+**Superseded by [[script-maintenance-convention]] section 3.** A script's
+complete version history now lives in its own `CHANGELOG.md`
+(`platforms/<lang>/<name>/CHANGELOG.md`), newest entry at the top; the
+script's header itself retains only the 3 most recent entries (most recent
+in full, the two before it abbreviated to one line each). See that section
+for the exact rules — this section's original text (full history embedded
+in the script, nothing external) no longer applies.
 
 ### 3. `--help` / usage implementation
 - Every script must support a help invocation (`-h`/`--help`, or the
@@ -43,6 +47,10 @@ banner defined in section 4 below with an upgrade-check outcome note.
   exit-code behavior.
 - Unrecognized options must be rejected immediately with a clear error,
   never silently ignored or misinterpreted as a positional argument.
+- A script that also implements [[script-upgrade-convention]] follows the
+  layered `--help`/`--help full`/`--help upgrade` visibility rule in
+  [[script-maintenance-convention]] section 2 instead of showing every
+  option in one flat list.
 
 ### 4. Startup version banner
 - Every normal (non-`--help`) invocation must print one line identifying the
@@ -73,7 +81,9 @@ banner defined in section 4 below with an upgrade-check outcome note.
 ## Rationale
 Generalizes the conventions established in `container-upgrade.sh` so every
 future script in this repository is self-documenting, diagnosable without
-external docs, and consistent regardless of author or language: version and
-history are always where you'd look for them (the file itself), `--help`
-always reflects reality because it's the same text as the header, and a
-non-zero exit code is always a reliable signal that something needs review.
+external docs, and consistent regardless of author or language: version
+history is always where you'd look for it (the header's recent-entries
+window, or `CHANGELOG.md` for the full record — see
+[[script-maintenance-convention]] section 3), `--help` always reflects
+reality because it's the same text as the header, and a non-zero exit code
+is always a reliable signal that something needs review.

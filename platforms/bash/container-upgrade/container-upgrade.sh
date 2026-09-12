@@ -1,141 +1,60 @@
 #!/usr/bin/env bash
-# Version: 1.1.3
+# Version: 1.1.6-dev3
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
 #
-# Version history (bump the patch number - C in A.B.C - on every change):
-#   1.0.0 - crash detection, pre/post classification, shared-image
-#           handling, summary report, colored error visibility, versioning
-#   1.0.1 - exit code reflects whether any errors occurred (1 if so, 0
-#           if the run was clean)
-#   1.0.2 - renamed from docker-update-containers.sh; version is now read
-#           from this header comment at runtime instead of being
-#           duplicated in a separate variable, so the two can't drift
-#   1.0.3 - added --recent-restart-threshold: a fast, no-wait pre-check
-#           using RestartCount and the container's most recent (re)start
-#           time (not original creation time) to catch crash loops
-#           slower than --precheck-seconds, plus detection of a
-#           healthcheck stuck in "starting" past the same threshold
-#   1.0.4 - separated "upgraded" (image actually changed) from
-#           "restarted" (no image change, only recreated because of
-#           --restart-all) in both the summary and the status list,
-#           instead of reporting both as "upgraded successfully"
-#   1.0.5 - unrecognized options (e.g. a typo'd flag) are now rejected
-#           immediately with a clear error instead of silently being
-#           treated as a container name; a container name that doesn't
-#           actually exist is now also reported clearly instead of
-#           crashing later with a bash "bad array subscript" error
-#   1.0.6 - header updated to conform to the repo-wide script-header
-#           convention (separate Version/Category/Description lines in
-#           place of the old inline "container-upgrade.sh - vX.Y.Z" line);
-#           version is now parsed from the "# Version:" line
-#   1.0.7 - made bash-3.2-safe per the repo-wide cross-platform-shell-
-#           compatibility requirement (macOS's stock /bin/bash is 3.2):
-#           replaced all `declare -A` associative arrays with a portable
-#           map_* emulation (see that section's comment), replaced both
-#           `mapfile` calls with plain while-read loops, and replaced
-#           `${arr[@]}` expansions of arrays that can legitimately be
-#           empty (VALID_CONTAINERS, ATTEMPTED_ORDER) with the
-#           `${arr[@]+"${arr[@]}"}` form, since bash 3.2's `set -u` treats
-#           expanding an empty array as an unbound-variable error
-#   1.0.8 - added self-update support per the repo-wide script-autoupdate
-#           convention: on every non-help invocation (unless
-#           --no-autoupdate), checks github.com/jnitecki/scripts for a
-#           newer bash/container-upgrade/vX.Y.Z tag, and if found,
-#           downloads and (after a syntax-only validation) applies it -
-#           in place with a re-exec when the script's own file is
-#           writable, otherwise running the fetched version from memory
-#           for this invocation only. Any failure at any stage falls back
-#           to continuing with the already-loaded version and is reported
-#           in the startup banner; it never aborts the run or affects the
-#           exit code. Checks are cached for 24h per
-#           ${XDG_CACHE_HOME:-$HOME/.cache}/scripts-autoupdate/, bypassable
-#           with --force-update-check.
-#   1.0.9 - downloaded update is now also checked, best-effort, against the
-#           content-hash prefix declared in its release tag's message (see
-#           the repo-wide release-tag-hook and script-autoupdate
-#           conventions): a mismatch falls back to the already-loaded
-#           version the same way a parse failure does. An unreachable
-#           check, a tag with no hash prefix (e.g. one made before this
-#           existed), or no local sha1sum/shasum is not treated as a
-#           failure - the update proceeds as if the check had passed.
-#   1.1.0 - self-update rebuilt as self-upgrade per the repo-wide
-#           script-upgrade convention (renamed from script-autoupdate-
-#           convention): the header's Update-Source: line is now
-#           Upgrade-Source:. Upgrading is now on by default every run
-#           (unless --upgrade-type none / --no-autoupdate), with four
-#           apply modes tried strongest-to-weakest based on what the
-#           filesystem actually allows - replacement (temp file + mv),
-#           overwrite (rewrite the file in place when its directory isn't
-#           writable), link (a copy under
-#           ${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/ when neither
-#           is writable, reused directly on a cache-hash match without
-#           re-downloading), and memory (never persisted) - each capped by
-#           --upgrade-type if given. Release-channel selection is now
-#           level-aware (dev/alpha/beta/rc/stable) via --upgrade-level,
-#           defaulting to the running version's own level. Applying an
-#           upgrade now trial-runs the candidate for real (this
-#           invocation's actual container work) before persisting it -
-#           only a successful run gets kept; a failed trial is this
-#           invocation's own failure, not retried under the old version.
-#           New --upgrade-check (report what would happen and exit, no
-#           download) and --upgrade-only (perform the upgrade and exit,
-#           skipping container work) entry points. The 24h cooldown cache
-#           is now 20 minutes and only gates a fully implicit invocation -
-#           any explicit upgrade-related flag always checks fresh, so
-#           --force-update-check is removed as redundant.
-#   1.1.1 - the startup banner now also notes when the check was skipped
-#           under the cooldown cache ("upgrade not checked: cooldown
-#           active") and when a check ran but found nothing newer ("no
-#           upgrade available") - previously both printed a bare banner
-#           indistinguishable from self-upgrade being disabled outright,
-#           which now remains the only bare-banner case. Separately, since
-#           a trial run succeeding doesn't guarantee the persist step
-#           after it succeeds too (e.g. the replacement mv, or the
-#           overwrite rewrite, can still fail on its own), that outcome is
-#           now reported in its own line after the trial run's output
-#           ("upgrade to vX.Y.Z applied (mode)" / "... failed to persist
-#           (mode): <reason> - will retry next run") - it never changes
-#           this invocation's exit code, which still reflects only the
-#           trial run's own result.
-#   1.1.2 - fixed a real bug in 1.1.0's content-hash check that made every
-#           self-upgrade fail with a false "content hash mismatch": the
-#           download was captured via plain `content=$(curl ...)`, and
-#           command substitution silently strips trailing newlines, so the
-#           hash was computed over one byte fewer than what the release-tag
-#           hook (which hashes `git show`'s output directly) actually
-#           declared - deterministic, on every check, regardless of how
-#           healthy the release was. Fixed by having the download carry a
-#           trailing sentinel byte through the capture, stripped back off
-#           before hashing. Also added persist-time re-verification: for
-#           replacement/overwrite/link (not memory), the actual on-disk
-#           bytes are hashed again, directly off the file, immediately
-#           before they're committed as the live script - a defense-in-
-#           depth check independent of the download-time one, catching a
-#           write-time corruption the way the original check could not by
-#           construction. A mismatch there is reported the same way a
-#           failed persist already was (post-trial, for replacement/
-#           overwrite) or as a pre-trial hash_mismatch banner note (link,
-#           which persists before its trial run).
-#   1.1.3 - added a restart-policy safety step around both restart
-#           strategies: a container whose restart policy is "always" is
-#           relaxed to "unless-stopped" right before it's stopped, and
-#           restored to "always" once the container ending up under the
-#           original name starts back up (or, in safe mode's
-#           fail-no-rollback path, restored on the stopped container left
-#           aside for manual recovery, since it never restarts). Without
-#           this, a container sitting stopped mid-upgrade (safe mode can
-#           leave one renamed-aside for the whole --timeout window) stays
-#           exposed to the engine's daemon/service restarting and bringing
-#           it back up on its old image out from under the upgrade - an
-#           explicit stop alone does not disable "always" the way it does
-#           "unless-stopped". Best-effort: a failure to relax or restore
-#           (e.g. an engine/version - some Podman releases - without
-#           `update --restart` support) never blocks or rolls back the
-#           actual upgrade, but is reported as its own error category in
-#           the summary with the specific detail of what failed.
+# HELP:IDENTITY:BEGIN
+# Version history (bump per docs/requirements/generic/script-maintenance-
+# convention.md section 4 on every change). This window shows STABLE
+# versions only, one entry each, newest first, most recent in full - see
+# CHANGELOG.md in this same directory for the complete history, including
+# every individual pre-release entry. Since this running version is itself
+# a pre-release, the "most recent" slot below is a single consolidated
+# entry for the whole in-progress cycle (every pre-release bump since the
+# last stable release, merged into one) instead of a stable entry - see
+# script-maintenance-convention.md section 3:
+#   1.1.6 (in progress - currently 1.1.6-dev3) - implements the repo-wide
+#           maintenance conventions from script-maintenance-convention.md:
+#           (1) --help is now layered - bare --help/self-upgrade options
+#           only on --help upgrade/both on --help full; (2) full history
+#           moved to CHANGELOG.md, this header trimmed to a stable-only
+#           window; (3) version-bump scheme changed - a suffixed version
+#           increments its trailing number, a bare version bumps the patch
+#           and starts a fresh -dev1 cycle; (4) self-upgrade version
+#           comparison now strips a trailing revision number before
+#           computing level and uses it as a tiebreaker when X.Y.Z and
+#           level are equal, so consecutive same-patch pre-release tags are
+#           actually recognized as upgrades - fixed alongside this,
+#           upgrade_parse_versions no longer discards a tag's suffix, which
+#           had silently broken download/hash-fetch URLs for any
+#           pre-release tag; (5) this window now shows stable versions
+#           only - every pre-release bump since the last stable release
+#           (like this entry itself) is consolidated into one running entry
+#           here instead of getting its own line, updated in place on each
+#           further pre-release bump until promoted to stable, at which
+#           point CHANGELOG.md gains a matching consolidated stable entry
+#           alongside the individual pre-release entries it already
+#           recorded (CHANGELOG.md itself is unaffected by this
+#           consolidation - every bump, pre-release included, keeps its own
+#           entry there); (6) the cooldown cache now only gates a fresh
+#           remote check - local apply-mode eligibility is always
+#           re-evaluated, so an already-cached candidate can still be
+#           promoted straight to "replacement"/"overwrite" on a
+#           cooldown-gated run if that eligibility has newly escalated past
+#           "link" (e.g. invoked via sudo this time); and "replacement"/
+#           "overwrite" now explicitly carry over the original file's
+#           permissions and ownership (ownership best-effort) instead of
+#           whatever the write happened to produce. See CHANGELOG.md for
+#           full detail on all six.
+#   1.1.5 - --help visually separates this script's own options from the
+#           self-upgrade options under two labeled groups.
+#   1.1.4 - fixed a self-upgrade hang in "overwrite"/"memory" apply modes:
+#           the candidate's $0 was the literal string "--", tripping up its
+#           own version-detection `grep ... "$0"` into reading stdin.
+# HELP:IDENTITY:END
 #
+# HELP:INTRO:BEGIN
 # Iterates running containers, groups them by image, pulls each unique
 # image once, and for every container whose image actually changed (or
 # every container if --restart-all is given) recreates it with the same
@@ -166,8 +85,9 @@
 # Requires: docker (or podman, see --engine) and jq. The run command for
 # each container is reconstructed locally from `<engine> inspect` JSON
 # (no external image or socket-mounted helper needed). curl is used for the
-# optional self-update check (see below); its absence only disables that
-# check, it does not stop the script from running.
+# optional self-update check (see --help upgrade or --help full for
+# details); its absence only disables that check, it does not stop the
+# script from running.
 #
 # Reconstruction covers: name, hostname (if overridden), user, workdir
 # (if overridden), env vars (only those added/changed vs. the image
@@ -189,10 +109,14 @@
 #     reproduced by get_run_command (but ARE checked by the config
 #     comparison in safe mode, so drift here is detected and rolled
 #     back rather than silently applied).
+# HELP:INTRO:END
 #
+# HELP:USAGE:BEGIN
 # Usage:
 #   ./container-upgrade.sh [options] [container names...]
+# HELP:USAGE:END
 #
+# HELP:CORE-OPTIONS:BEGIN
 # Options:
 #   --restart-all       Recreate every targeted container regardless of
 #                        whether its image actually changed.
@@ -227,6 +151,12 @@
 #                        diff you've already verified is harmless.
 #   --dry-run           Show what would happen, take no action, and skip
 #                        the health-outcome summary (nothing was run).
+# HELP:CORE-OPTIONS:END
+#
+# HELP:UPGRADE-OPTIONS:BEGIN
+# Self-upgrade options (this script updating its own file - see
+# "Self-upgrade" below; unrelated to upgrading container images, which is
+# this script's own separate, unrelated purpose):
 #   --upgrade-type replacement|overwrite|link|memory|none
 #                        Caps which self-upgrade apply mode is attempted
 #                        (falls back to a weaker mode automatically if the
@@ -250,30 +180,37 @@
 #   --no-autoupdate      Shortcut for --upgrade-type none: skip self-upgrade
 #                        entirely for this run. Not combinable with
 #                        --upgrade-type.
+# HELP:UPGRADE-OPTIONS:END
 #
+# HELP:TAIL:BEGIN
 # If no container names are given, all running containers are targeted.
+# HELP:TAIL:END
 #
+# HELP:UPGRADE-EXPLANATION:BEGIN
 # Self-upgrade: on every invocation other than --help (and unless
 # --upgrade-type none / --no-autoupdate is given), the script checks
 # github.com/jnitecki/scripts for a newer release of itself and, if
-# eligible, upgrades - see the version-history entries for 1.1.0-1.1.2
-# above for the full behavior (apply modes, --upgrade-level,
-# --upgrade-check, --upgrade-only). A successful upgrade actually runs
-# this invocation's real container work under the new version before
-# persisting anything; that new version's own startup line is what you
-# see, noting it self-upgraded. This never aborts the run on its own and
-# never changes the exit code beyond what the real work itself determines.
-# The startup line always reports the upgrade-check outcome - checked and
-# nothing newer, skipped under the cooldown, or a failed check - except
-# when self-upgrade is disabled outright, the one case with no note at
-# all. After a successful trial run, one further line reports whether
-# persisting it (separately from running it) also succeeded.
+# eligible, upgrades - see CHANGELOG.md's 1.1.0-1.1.2 entries for the full
+# behavior (apply modes, --upgrade-level, --upgrade-check, --upgrade-only).
+# A successful upgrade actually runs this invocation's real container work
+# under the new version before persisting anything; that new version's own
+# startup line is what you see, noting it self-upgraded. This never aborts
+# the run on its own and never changes the exit code beyond what the real
+# work itself determines. The startup line always reports the upgrade-check
+# outcome - checked and nothing newer, skipped under the cooldown, or a
+# failed check - except when self-upgrade is disabled outright, the one
+# case with no note at all. After a successful trial run, one further line
+# reports whether persisting it (separately from running it) also
+# succeeded.
+# HELP:UPGRADE-EXPLANATION:END
 #
+# HELP:OUTPUT:BEGIN
 # Output: errors (failed pulls, failed reconstructions, failed starts,
 # config mismatches, rollbacks, and any container ending up still broken)
 # are printed in red/bold when the terminal supports color. If any
 # occurred, the very last line of output is "ERRORS OCCURRED - REVIEW
 # THE OUTPUT" in caps, also colored.
+# HELP:OUTPUT:END
 
 set -uo pipefail
 
@@ -295,11 +232,12 @@ UPGRADE_ONLY=false
 TARGETS=()
 
 # Version lives only in the header comment above (line 2: "# Version: X.Y.Z"
-# or "# Version: X.Y.Z-suffix"). Read it from here rather than duplicating
-# it in a variable, so the two can never drift out of sync. Falls back to
-# "unknown" if the header is ever restructured and the pattern no longer
-# matches.
-version_line=$(grep -m1 -E '^# Version: [0-9]+\.[0-9]+\.[0-9]+(-[a-z]+)?$' "$0" 2>/dev/null || true)
+# or "# Version: X.Y.Z-<level><N>", N a trailing revision number per
+# docs/requirements/generic/script-maintenance-convention.md section 4, e.g.
+# "1.1.6-dev1"). Read it from here rather than duplicating it in a
+# variable, so the two can never drift out of sync. Falls back to "unknown"
+# if the header is ever restructured and the pattern no longer matches.
+version_line=$(grep -m1 -E '^# Version: [0-9]+\.[0-9]+\.[0-9]+(-[a-z]+[0-9]*)?$' "$0" 2>/dev/null || true)
 SCRIPT_VERSION="${version_line##*: }"
 [[ -z "$SCRIPT_VERSION" ]] && SCRIPT_VERSION="unknown"
 HAD_ERRORS=false
@@ -456,16 +394,47 @@ upgrade_level_rank() {
   esac
 }
 
+# args: $1="X.Y.Z" or "X.Y.Z-<level><N>" (N optional) -> prints the bare
+# level word ("dev"/"alpha"/"beta"/"rc"), or "stable" if there is no suffix
+# at all. Strips a trailing revision number
+# (docs/requirements/generic/script-maintenance-convention.md section 4)
+# before returning, so "dev12" and "dev" both report level "dev" - the
+# number is a within-level tiebreaker (upgrade_version_number/
+# upgrade_version_gt below), never part of the level name itself.
 upgrade_version_level() {
   case "$1" in
-    *-*) printf '%s' "${1#*-}" ;;
+    *-*)
+      local suffix="${1#*-}" word
+      word="${suffix%%[0-9]*}"
+      printf '%s' "$word"
+      ;;
     *) printf 'stable' ;;
   esac
 }
 
+# args: $1="X.Y.Z" or "X.Y.Z-<level><N>" -> prints the trailing revision
+# number N as a plain integer (e.g. "12" for "...-rc12"), or "0" if the
+# suffix has no trailing digits (including no suffix at all, i.e. stable).
+upgrade_version_number() {
+  case "$1" in
+    *-*)
+      local suffix="${1#*-}" word n
+      word="${suffix%%[0-9]*}"
+      n="${suffix#$word}"
+      printf '%s' "${n:-0}"
+      ;;
+    *) printf '0' ;;
+  esac
+}
+
 # --- numeric major.minor.patch comparison (no `sort -V` - BSD `sort` lacks -
-# it, see cross-platform-shell-compatibility.md). Ignores any -suffix on ----
-# either side - level filtering (upgrade_highest_at_level) handles that. ----
+# it, see cross-platform-shell-compatibility.md), with level+number as a ---
+# tiebreaker when X.Y.Z is equal (script-maintenance-convention.md section --
+# 4): 1.2.3-dev1 < 1.2.3-dev2 < 1.2.3-rc1 < 1.2.3 (stable) < 1.2.4-dev1. ----
+# Pure ordering only - does NOT enforce the separate eligibility gate
+# (upgrade_highest_at_level's min-level filter) that keeps e.g. a running
+# stable 1.2.3 from ever treating 1.2.4-beta1 as a candidate at all; that
+# gate runs first, before this function is ever asked to compare anything.
 upgrade_version_gt() {
   local a1 a2 a3 b1 b2 b3 rest
   a1=${1%%.*}; rest=${1#*.}; a2=${rest%%.*}; a3=${rest#*.}; a3=${a3%%-*}
@@ -474,7 +443,14 @@ upgrade_version_gt() {
   [[ "$a1" -lt "$b1" ]] && return 1
   [[ "$a2" -gt "$b2" ]] && return 0
   [[ "$a2" -lt "$b2" ]] && return 1
-  [[ "$a3" -gt "$b3" ]]
+  [[ "$a3" -gt "$b3" ]] && return 0
+  [[ "$a3" -lt "$b3" ]] && return 1
+  local la lb ra rb
+  la=$(upgrade_version_level "$1"); ra=$(upgrade_level_rank "$la") || ra=-1
+  lb=$(upgrade_version_level "$2"); rb=$(upgrade_level_rank "$lb") || rb=-1
+  [[ "$ra" -gt "$rb" ]] && return 0
+  [[ "$ra" -lt "$rb" ]] && return 1
+  [[ "$(upgrade_version_number "$1")" -gt "$(upgrade_version_number "$2")" ]]
 }
 
 # --- section 3: discover every matching tag, no `git` required -------------
@@ -484,21 +460,28 @@ upgrade_fetch_tags_json() {
     "https://api.github.com/repos/${owner}/${repo}/git/matching-refs/tags/${lang}/${name}/v"
 }
 
-# args: $1=json $2=lang $3=name -> prints "X.Y.Z level" pairs, one per
-# discovered tag, one per line. `[^"]*` (rather than an optional-group
-# regex like `\?`/`\{0,1\}`, a GNU sed extension BSD sed lacks) captures the
-# version plus its optional -suffix in one go.
+# args: $1=json $2=lang $3=name -> prints "version level" pairs, one per
+# discovered tag, one per line. `version` is the tag's full version string,
+# suffix (and revision number) included - it is NOT reduced to bare X.Y.Z
+# here, unlike an earlier version of this script: doing so silently
+# discarded the suffix before it ever reached upgrade_download/
+# upgrade_fetch_tag_hash (both need the exact tag string, e.g. "1.0.8-beta",
+# to build a correct `v<version>` URL) and made two same-X.Y.Z pre-release
+# tags indistinguishable to upgrade_highest_at_level (see upgrade_version_gt's
+# level+number tiebreak above, which only works if the full string survives
+# this far). `[^"]*` (rather than an optional-group regex like `\?`/
+# `\{0,1\}`, a GNU sed extension BSD sed lacks) captures the version plus
+# its optional -suffix in one go.
 upgrade_parse_versions() {
-  local json="$1" lang="$2" name="$3" refs r v
+  local json="$1" lang="$2" name="$3" refs r
   refs=$(printf '%s\n' "$json" \
     | sed -n 's/.*"ref": *"refs\/tags\/'"${lang}"'\/'"${name}"'\/v\([^"]*\)".*/\1/p')
   for r in $refs; do
-    v="${r%%-*}"
-    printf '%s %s\n' "$v" "$(upgrade_version_level "$r")"
+    printf '%s %s\n' "$r" "$(upgrade_version_level "$r")"
   done
 }
 
-# args: $1=owner $2=repo $3=lang $4=name -> prints "X.Y.Z level" pairs for
+# args: $1=owner $2=repo $3=lang $4=name -> prints "version level" pairs for
 # every discovered tag (one fetch); nothing + return 1 on failure. Callers
 # needing more than one filtered view (--upgrade-check's three lines) call
 # this once and reuse the result with upgrade_highest_at_level, rather than
@@ -509,10 +492,10 @@ upgrade_discover() {
   upgrade_parse_versions "$json" "$lang" "$name"
 }
 
-# args: $1=multiline "X.Y.Z level" pairs (as from upgrade_discover)
+# args: $1=multiline "version level" pairs (as from upgrade_discover)
 #       $2=minimum level name
-# -> prints the numerically-highest version at or above that level, or
-# nothing if none qualify.
+# -> prints the highest version (full string, suffix included - see
+# upgrade_version_gt) at or above that level, or nothing if none qualify.
 upgrade_highest_at_level() {
   local versions="$1" min_level="$2" min_rank
   min_rank=$(upgrade_level_rank "$min_level") || return 1
@@ -581,6 +564,18 @@ upgrade_cache_dir() {
 
 upgrade_cache_file() {
   printf '%s/%s.sh' "$(upgrade_cache_dir "$1" "$2")" "$2"
+}
+
+# args: $1=file path -> prints the version declared in that file's own
+# "# Version: X.Y.Z[-<level><N>]" header line (same pattern used to parse
+# $SCRIPT_VERSION near the top of this file), or nothing + return 1 if the
+# file doesn't exist or its header doesn't match. Used to read an
+# already-cached candidate's version (section 7) locally, with no network
+# round-trip - see upgrade_prepare_cached_candidate below.
+upgrade_file_version() {
+  local file="$1" line
+  line=$(grep -m1 -E '^# Version: [0-9]+\.[0-9]+\.[0-9]+(-[a-z]+[0-9]*)?$' "$file" 2>/dev/null) || return 1
+  printf '%s' "${line##*: }"
 }
 
 # --- section 5: download the candidate + syntax-only validation ------------
@@ -686,11 +681,50 @@ upgrade_cooldown_elapsed() {
   [[ $((now - last_checked)) -ge "$UPGRADE_COOLDOWN_SECONDS" ]]
 }
 
+# --- section 6: permission & ownership preservation -------------------------
+# `chmod --reference`/`chown --reference` are GNU-only and fail silently
+# under macOS's BSD chmod/chown (bash-3.2 target), so mode/owner/group are
+# read via `stat` (GNU form tried first, BSD form as fallback - same
+# GNU-then-BSD pattern as parse_to_epoch above for `date`) and re-applied
+# explicitly instead.
+
+# args: $1=path -> prints octal permission bits (e.g. "755", no file-type
+# bits, no leading zero), or nothing on failure.
+upgrade_stat_mode() {
+  local path="$1"
+  stat -c '%a' "$path" 2>/dev/null && return 0
+  stat -f '%OLp' "$path" 2>/dev/null
+}
+
+# args: $1=path -> prints "owner:group" (names), or nothing on failure.
+upgrade_stat_owner_group() {
+  local path="$1"
+  stat -c '%U:%G' "$path" 2>/dev/null && return 0
+  stat -f '%Su:%Sg' "$path" 2>/dev/null
+}
+
+# args: $1=source_path (whose mode/ownership to copy) $2=target_path ->
+# best-effort chmod+chown of target to match source (section 6's
+# "Permission & ownership preservation"). Mode bits are always applied - an
+# unprivileged owner can always set them on a file it owns; ownership is
+# best-effort, since chown requires sufficient privilege (typically root)
+# and fails silently otherwise - not treated as an upgrade failure, the same
+# best-effort philosophy as sections 5/14.
+upgrade_copy_mode_owner() {
+  local source="$1" target="$2" mode owner_group
+  mode=$(upgrade_stat_mode "$source")
+  [[ -n "$mode" ]] && chmod "$mode" "$target" 2>/dev/null
+  owner_group=$(upgrade_stat_owner_group "$source")
+  [[ -n "$owner_group" ]] && chown "$owner_group" "$target" 2>/dev/null
+  return 0
+}
+
 # --- section 6/8: persistence primitives (pure filesystem, no execution) ---
 
 # args: $1=content $2=script_path -> writes a fresh temp file alongside
-# script_path, carrying over the executable bit; prints its path, or
-# nothing + return 1 on failure.
+# script_path, carrying over its permissions and ownership (best-effort for
+# ownership - see upgrade_copy_mode_owner); prints its path, or nothing +
+# return 1 on failure.
 upgrade_write_temp_sibling() {
   local content="$1" script_path="$2" tmp
   tmp=$(mktemp "${script_path}.XXXXXX" 2>/dev/null) || return 1
@@ -698,9 +732,28 @@ upgrade_write_temp_sibling() {
     rm -f "$tmp"
     return 1
   fi
-  # `chmod --reference` is GNU-only and fails silently on macOS's BSD chmod
-  # (bash-3.2 target) - carry over just the executable bit explicitly.
-  [[ -x "$script_path" ]] && chmod +x "$tmp" 2>/dev/null
+  upgrade_copy_mode_owner "$script_path" "$tmp"
+  printf '%s' "$tmp"
+}
+
+# args: $1=source_file $2=script_path -> byte-exact copy of source_file
+# into a fresh temp file alongside script_path (same scheme as
+# upgrade_write_temp_sibling), then carries over script_path's permissions
+# and ownership. Used to promote an already-cached, already-validated
+# candidate (section 7) straight to `replacement` without a lossy
+# `content=$(cat ...)` round-trip through a bash variable - see
+# upgrade_download's comment for why capturing file content into a variable
+# is unsafe here (it would strip trailing newlines the same way a naive
+# download capture does; going file-to-file via `cp` avoids that entirely).
+# Prints the temp file's path, or nothing + return 1 on failure.
+upgrade_write_temp_sibling_from_file() {
+  local source_file="$1" script_path="$2" tmp
+  tmp=$(mktemp "${script_path}.XXXXXX" 2>/dev/null) || return 1
+  if ! cp "$source_file" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  upgrade_copy_mode_owner "$script_path" "$tmp"
   printf '%s' "$tmp"
 }
 
@@ -728,8 +781,25 @@ upgrade_persist_replacement() {
 
 # args: $1=content $2=script_path -> the "overwrite" persist step (rewrites
 # the existing, file-writable-but-not-directory-writable script in place).
+# Unlike "replacement", this never creates a new inode - the shell
+# redirection truncates and rewrites script_path's own existing file - so
+# it already satisfies section 6's "Permission & ownership preservation"
+# by construction, with no explicit chmod/chown needed. That guarantee only
+# holds as long as the persist step writes directly to script_path this
+# way; staging through some other intermediate file and swapping it in
+# would need an explicit copy of script_path's original mode/ownership
+# onto that replacement first.
 upgrade_persist_overwrite() {
   printf '%s' "$1" > "$2" 2>/dev/null
+}
+
+# args: $1=source_file $2=script_path -> byte-exact "overwrite" persist
+# from an already-on-disk file (no `content=$(cat ...)` round-trip through
+# a variable - same rationale as upgrade_write_temp_sibling_from_file).
+# Used to promote an already-cached candidate to `overwrite` mode. Same
+# in-place, no-new-inode guarantee as upgrade_persist_overwrite above.
+upgrade_persist_overwrite_from_file() {
+  cat "$1" > "$2" 2>/dev/null
 }
 
 # args: $1=content $2=cache_file -> the "link" persist step: writes into the
@@ -842,6 +912,59 @@ upgrade_prepare_candidate() {
   UPGRADE_LATEST="$latest"
   UPGRADE_SELECTED_MODE="$mode"
   UPGRADE_CANDIDATE_CONTENT="$content"
+  return 0
+}
+
+# --- section 2's cooldown clarification: local-only counterpart to ---------
+# upgrade_prepare_candidate, used only when the cooldown (section 14) has
+# suppressed a fresh remote check. No network calls at all - looks only at
+# whatever already sits in the link-mode cache (section 7) from an earlier
+# run, and at this run's own freshly-determined filesystem eligibility
+# (section 6, always re-evaluated, never itself cached). Sets UPGRADE_LATEST
+# and UPGRADE_SELECTED_MODE on success, mirroring upgrade_prepare_candidate's
+# contract, but leaves UPGRADE_CANDIDATE_CONTENT and UPGRADE_TAG_HASH empty -
+# the caller reads bytes straight from the cache file itself
+# (upgrade_cache_file) via upgrade_write_temp_sibling_from_file /
+# upgrade_persist_overwrite_from_file, never through a variable (same
+# capture pitfall upgrade_download's comment describes for downloads), and
+# there is no new download to re-verify a hash against (the cached bytes
+# were already hash-validated when originally cached - section 7's own
+# trust model). Returns 1 with UPGRADE_BANNER_NOTE left unset - this is not
+# itself a failure, the caller's existing cooldown "not_checked" banner
+# still applies - when there is nothing to promote: no cache file, its
+# declared version isn't actually newer than $SCRIPT_VERSION, it's below
+# the effective level, or this run's mode hasn't actually escalated past
+# `link` (still `link` or `memory` - nothing gained by "promoting" to the
+# same or a weaker mode).
+upgrade_prepare_cached_candidate() {
+  UPGRADE_LATEST=""
+  UPGRADE_SELECTED_MODE=""
+  UPGRADE_CANDIDATE_CONTENT=""
+  UPGRADE_TAG_HASH=""
+
+  local cache_dir cache_file cached_version
+  cache_dir=$(upgrade_cache_dir "$SCRIPT_LANG" "$SCRIPT_NAME")
+  cache_file=$(upgrade_cache_file "$SCRIPT_LANG" "$SCRIPT_NAME")
+  [[ -f "$cache_file" ]] || return 1
+
+  cached_version=$(upgrade_file_version "$cache_file") || return 1
+  upgrade_version_gt "$cached_version" "$SCRIPT_VERSION" || return 1
+
+  local effective_level effective_rank cached_rank
+  effective_level="${UPGRADE_LEVEL:-$(upgrade_version_level "$SCRIPT_VERSION")}"
+  effective_rank=$(upgrade_level_rank "$effective_level") || return 1
+  cached_rank=$(upgrade_level_rank "$(upgrade_version_level "$cached_version")") || return 1
+  [[ "$cached_rank" -ge "$effective_rank" ]] || return 1
+
+  local mode
+  mode=$(upgrade_select_mode "$UPGRADE_TYPE" "$SCRIPT_PATH" "$cache_dir")
+  case "$mode" in
+    replacement|overwrite) ;;
+    *) return 1 ;;
+  esac
+
+  UPGRADE_LATEST="$cached_version"
+  UPGRADE_SELECTED_MODE="$mode"
   return 0
 }
 
@@ -989,17 +1112,32 @@ upgrade_main() {
   [[ -n "$UPGRADE_TYPE" ]] && explicit=1
   [[ -n "$UPGRADE_LEVEL" ]] && explicit=1
   local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/${SCRIPT_LANG}_${SCRIPT_NAME}.state"
+  local cache_source=""
   if [[ "$explicit" == "0" ]] && ! upgrade_cooldown_elapsed "$cache_file"; then
-    UPGRADE_BANNER_NOTE=$(upgrade_banner_note not_checked)
-    return 0
+    # Section 2's cooldown clarification: the cooldown only gates the
+    # *remote* discovery/download below - local apply-mode eligibility is
+    # always re-evaluated fresh regardless (upgrade_select_mode, called
+    # from upgrade_prepare_cached_candidate), so an already-cached,
+    # already-validated candidate (section 7) can still be promoted
+    # straight to a stronger mode right now if that eligibility has newly
+    # escalated past `link` since it was cached (e.g. this run is `sudo`,
+    # the one that cached it wasn't). No cooldown timestamp is written in
+    # this branch below - nothing remote was actually checked, so the
+    # original schedule is left untouched for the next implicit run.
+    if ! upgrade_prepare_cached_candidate; then
+      UPGRADE_BANNER_NOTE=$(upgrade_banner_note not_checked)
+      return 0
+    fi
+    cache_source=$(upgrade_cache_file "$SCRIPT_LANG" "$SCRIPT_NAME")
+  else
+    upgrade_prepare_candidate || return 0
+
+    # Best-effort cache write (section 14) - a failure to write it is not
+    # itself a failure, the check just runs again next time. Only reached
+    # here, since only this branch actually performed a remote check.
+    mkdir -p "$(dirname "$cache_file")" 2>/dev/null
+    date +%s > "$cache_file" 2>/dev/null || true
   fi
-
-  upgrade_prepare_candidate || return 0
-
-  # Best-effort cache write (section 14) - a failure to write it is not
-  # itself a failure, the check just runs again next time.
-  mkdir -p "$(dirname "$cache_file")" 2>/dev/null
-  date +%s > "$cache_file" 2>/dev/null || true
 
   local latest="$UPGRADE_LATEST" mode="$UPGRADE_SELECTED_MODE" content="$UPGRADE_CANDIDATE_CONTENT" tag_hash="$UPGRADE_TAG_HASH"
   export CONTAINER_UPGRADE_APPLIED_FROM="$SCRIPT_VERSION"
@@ -1008,7 +1146,16 @@ upgrade_main() {
   case "$mode" in
     replacement)
       local tmp code
-      if ! tmp=$(upgrade_write_temp_sibling "$content" "$SCRIPT_PATH"); then
+      # $content is empty when this candidate was promoted from the local
+      # cache (cache_source set above) rather than freshly downloaded -
+      # read bytes straight from that file instead, byte-exact, no
+      # variable round-trip (see upgrade_write_temp_sibling_from_file).
+      if [[ -n "$cache_source" ]]; then
+        tmp=$(upgrade_write_temp_sibling_from_file "$cache_source" "$SCRIPT_PATH")
+      else
+        tmp=$(upgrade_write_temp_sibling "$content" "$SCRIPT_PATH")
+      fi
+      if [[ -z "$tmp" ]]; then
         unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
         UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
         return 0
@@ -1038,28 +1185,52 @@ upgrade_main() {
       ;;
     overwrite)
       local code
-      bash -c "$content" -- "$@"; code=$?
+      if [[ -n "$cache_source" ]]; then
+        # A real, already-executable file on disk (the link-mode cache
+        # file) - run it directly, sidestepping the /dev/null-as-$0
+        # workaround below entirely, since its own $0 is already a real path.
+        "$cache_source" "$@"; code=$?
+      else
+        # A literal "--" here becomes the candidate's $0, and its own
+        # `grep ... "$0"` (version detection, top of file) then sees a
+        # trailing "--" with no filename after it - grep treats that as
+        # "end of options" and falls back to reading stdin, hanging forever
+        # with no output. /dev/null is a real, always-empty file instead.
+        bash -c "$content" /dev/null "$@"; code=$?
+      fi
       if [[ "$code" -eq 0 ]]; then
-        # Persist-time verification (section 6): "overwrite" has no temp
-        # file of its own (the trial runs $content directly via `bash -c`,
-        # never touching disk) and can't write one next to $SCRIPT_PATH
-        # either - that mode's whole precondition is that the directory
-        # isn't writable. upgrade_write_temp_scratch gets real on-disk
-        # bytes to re-hash from some other writable location instead; a
-        # failure to even get that scratch copy just skips the check
-        # (best-effort, same as the rest of this convention), not a
-        # mismatch.
-        local scratch mismatch=0
-        if scratch=$(upgrade_write_temp_scratch "$content"); then
-          upgrade_verify_disk_hash "$scratch" "$tag_hash" || mismatch=1
-          rm -f "$scratch"
-        fi
-        if [[ "$mismatch" == "1" ]]; then
-          err "Upgrade to v${latest} failed to persist (overwrite): on-disk content hash mismatch after trial run - not applied, will retry next run"
-        elif upgrade_persist_overwrite "$content" "$SCRIPT_PATH"; then
-          log "Upgrade to v${latest} applied (overwrite)"
+        if [[ -n "$cache_source" ]]; then
+          # Already-on-disk, already-hash-validated bytes (section 7) -
+          # copy them straight in, byte-exact, no variable round-trip and
+          # nothing new to re-verify a hash against (nothing was
+          # downloaded this run).
+          if upgrade_persist_overwrite_from_file "$cache_source" "$SCRIPT_PATH"; then
+            log "Upgrade to v${latest} applied (overwrite)"
+          else
+            err "Upgrade to v${latest} failed to persist (overwrite): could not rewrite ${SCRIPT_PATH} - will retry next run"
+          fi
         else
-          err "Upgrade to v${latest} failed to persist (overwrite): could not rewrite ${SCRIPT_PATH} - will retry next run"
+          # Persist-time verification (section 6): "overwrite" has no temp
+          # file of its own (the trial runs $content directly via `bash -c`,
+          # never touching disk) and can't write one next to $SCRIPT_PATH
+          # either - that mode's whole precondition is that the directory
+          # isn't writable. upgrade_write_temp_scratch gets real on-disk
+          # bytes to re-hash from some other writable location instead; a
+          # failure to even get that scratch copy just skips the check
+          # (best-effort, same as the rest of this convention), not a
+          # mismatch.
+          local scratch mismatch=0
+          if scratch=$(upgrade_write_temp_scratch "$content"); then
+            upgrade_verify_disk_hash "$scratch" "$tag_hash" || mismatch=1
+            rm -f "$scratch"
+          fi
+          if [[ "$mismatch" == "1" ]]; then
+            err "Upgrade to v${latest} failed to persist (overwrite): on-disk content hash mismatch after trial run - not applied, will retry next run"
+          elif upgrade_persist_overwrite "$content" "$SCRIPT_PATH"; then
+            log "Upgrade to v${latest} applied (overwrite)"
+          else
+            err "Upgrade to v${latest} failed to persist (overwrite): could not rewrite ${SCRIPT_PATH} - will retry next run"
+          fi
         fi
       fi
       exit "$code"
@@ -1092,7 +1263,9 @@ upgrade_main() {
       exit "$code"
       ;;
     memory)
-      bash -c "$content" -- "$@"
+      # See the "overwrite" case above for why /dev/null (not "--") is
+      # passed as $0 here.
+      bash -c "$content" /dev/null "$@"
       exit $?   # never persisted, regardless of outcome
       ;;
   esac
@@ -1102,8 +1275,81 @@ upgrade_main() {
 # Self-upgrade (docs/requirements/generic/script-upgrade-convention.md) ends
 # =============================================================================
 
+# args: $1=region name (e.g. "CORE-OPTIONS") -> prints the lines between
+# that region's "# HELP:<name>:BEGIN"/"# HELP:<name>:END" marker comments
+# (both markers excluded), sliced out of this script's own header by
+# content, not by line number. Line-number slicing (this script's own
+# approach before docs/requirements/generic/script-maintenance-convention.md
+# section 2) breaks silently every time the header grows or shrinks by even
+# one line - exactly the kind of edit this file makes constantly (version
+# history, option docs). Marker-based extraction never needs updating when
+# unrelated header content changes.
+usage_region() {
+  sed -n "/^# HELP:$1:BEGIN\$/,/^# HELP:$1:END\$/p" "$0" | sed '1d;$d'
+}
+
+# Prints the Version:/Category:/Description:/Upgrade-Source: lines. Unlike
+# every other usage_region() above, this one IS a fixed line-number slice
+# (lines 2-5) rather than marker-based - safe here specifically because
+# docs/requirements/generic/script-header-convention.md pins these four
+# lines as the literal first lines of the file right after the shebang,
+# before any other header content (including a HELP:IDENTITY:BEGIN marker,
+# which is why that region starts only after them, not before).
+usage_header_fields() {
+  sed -n '2,5p' "$0"
+}
+
+# args: $1=variant ("core" [default] | "upgrade" | "full") - see
+# docs/requirements/generic/script-maintenance-convention.md section 2.
+# "core" (bare --help) shows this script's own options only; "upgrade"
+# (--help upgrade) shows only the self-upgrade options; "full" (--help
+# full) shows both, self-upgrade options always last.
 usage() {
-  sed -n '2,276p' "$0"
+  case "${1:-core}" in
+    full)
+      usage_header_fields
+      printf '#\n'
+      usage_region IDENTITY
+      printf '#\n'
+      usage_region INTRO
+      printf '#\n'
+      usage_region USAGE
+      printf '#\n'
+      usage_region CORE-OPTIONS
+      printf '#\n'
+      usage_region UPGRADE-OPTIONS
+      printf '#\n'
+      usage_region TAIL
+      printf '#\n'
+      usage_region UPGRADE-EXPLANATION
+      printf '#\n'
+      usage_region OUTPUT
+      ;;
+    upgrade)
+      usage_header_fields
+      printf '#\n'
+      usage_region IDENTITY
+      printf '#\n# Self-upgrade options only - see --help for this script'"'"'s own\n# options, or --help full for everything together.\n#\n'
+      usage_region UPGRADE-OPTIONS
+      printf '#\n'
+      usage_region UPGRADE-EXPLANATION
+      ;;
+    core|*)
+      usage_header_fields
+      printf '#\n'
+      usage_region IDENTITY
+      printf '#\n'
+      usage_region INTRO
+      printf '#\n'
+      usage_region USAGE
+      printf '#\n'
+      usage_region CORE-OPTIONS
+      printf '#\n# Self-upgrade options (this script updating its own file) are not shown\n# here - see --help upgrade, or --help full for everything together.\n#\n'
+      usage_region TAIL
+      printf '#\n'
+      usage_region OUTPUT
+      ;;
+  esac
   exit 1
 }
 
@@ -1158,7 +1404,13 @@ while [[ $# -gt 0 ]]; do
         err "Invalid --engine: $ENGINE (expected docker|podman)"; exit 1
       fi
       shift 2 ;;
-    -h|--help) usage ;;
+    -h|--help)
+      case "${2:-}" in
+        full) usage full ;;
+        upgrade) usage upgrade ;;
+        *) usage core ;;
+      esac
+      ;;
     -*)
       err "Unknown option: $1"
       err "Run with --help to see valid options."

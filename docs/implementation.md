@@ -295,3 +295,167 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   out byte-identical to the tag's raw content (confirmed via `diff`),
   trailing newline included — fixing, as a side effect, the fact that
   every self-upgraded file was previously missing its final newline too.
+- **Fixed: trial-run hang in `overwrite`/`memory` modes (1.1.4)**: both
+  ran the candidate as `bash -c "$content" -- "$@"`, which makes the
+  literal string `--` the candidate's `$0`. The candidate's own
+  version-detection line near the top of the file (`grep ... "$0"`) then
+  received a trailing `--` with no filename after it; GNU grep treats
+  that as "end of options" and falls back to reading stdin, which never
+  reaches EOF, hanging the whole trial run indefinitely with no output at
+  all (confirmed live via `ps`: a `bash -c` process with a `grep` child
+  blocked on stdin). Fixed by passing `/dev/null` as `$0` instead of
+  `--` — an always-existing, always-empty file, so the grep just finds no
+  match and version detection falls through to its existing `unknown`
+  fallback, same as it does for any other unreadable path.
+- **`--help` grouping (1.1.5)**: the `# Options:` block now labels two
+  sub-groups — this script's own container-upgrade flags, and the
+  self-upgrade flags (which upgrade the script file itself) — instead of
+  one flat list, since both sets used the word "upgrade" for unrelated
+  things. Purely a `--help` text change; no flag behavior moved or
+  changed. `usage()`'s `sed -n '2,NNNp'` range was adjusted to match the
+  header comment's new line count each time it grew (1.1.4's changelog
+  entry, then this section's own heading lines).
+- **Repo-wide maintenance conventions implemented (1.1.6-dev1)** — see
+  `docs/requirements/generic/script-maintenance-convention.md`:
+  - **`--help` layering (supersedes 1.1.5's grouping)**: `usage()` no
+    longer does one hardcoded `sed -n 'A,Bp'` slice of the whole header.
+    The header now carries content-based markers
+    (`# HELP:<region>:BEGIN`/`# HELP:<region>:END` around each of IDENTITY,
+    INTRO, USAGE, CORE-OPTIONS, UPGRADE-OPTIONS, TAIL,
+    UPGRADE-EXPLANATION, OUTPUT), and a new `usage_region()` helper
+    extracts one by content via
+    `sed -n '/^# HELP:$1:BEGIN$/,/^# HELP:$1:END$/p' "$0" | sed '1d;$d'`.
+    `usage()` composes these per variant: bare `--help` (IDENTITY + core
+    options), `--help upgrade` (IDENTITY + self-upgrade options only, with
+    `UPGRADE-OPTIONS` + `UPGRADE-EXPLANATION`), `--help full` (everything,
+    self-upgrade options last) — IDENTITY (the `Version:`/`Category:`/
+    `Description:`/`Upgrade-Source:` lines plus the 3-entry changelog
+    window) is common to all three, added after the first pass at this
+    (which forgot it entirely, so no `--help` variant showed the version
+    or changelog at all — caught immediately by re-reading the actual
+    output, not just the exit code). This also permanently fixes the
+    line-number fragility 1.1.5's note above already flagged — marker
+    regions never need updating when unrelated header content changes.
+  - **`CHANGELOG.md`**: the complete 1.0.0-1.1.5 history moved to
+    `platforms/bash/container-upgrade/CHANGELOG.md`, newest first; the
+    script header keeps only its 3 most recent entries, **also newest
+    first** (most recent in full, two after it abbreviated) — matching
+    `CHANGELOG.md`'s ordering, unlike the old in-script convention which
+    appended at the bottom.
+  - **Numbered pre-release suffixes**: `upgrade_version_level` now strips
+    a trailing revision number before returning the level word (`"dev12"`
+    → level `"dev"`); a new `upgrade_version_number` extracts that number.
+    `upgrade_version_gt` gained a third comparison tier — level rank, then
+    the number itself — used only when `X.Y.Z` is already equal, so
+    `1.2.3-dev1 < 1.2.3-dev2`. Applied to the bash blueprint first (per
+    the new blueprint-first-then-replicate rule), then to
+    `container-upgrade.sh`.
+  - **Real bug found and fixed along the way**: `upgrade_parse_versions`
+    used to reduce every discovered tag to bare `X.Y.Z` (`v="${r%%-*}"`)
+    before it ever reached `upgrade_download`/`upgrade_fetch_tag_hash` —
+    both of which build a `v<version>` URL that needs the *exact* tag
+    string. Any pre-release tag (e.g. `1.0.8-beta`) would therefore have
+    always 404'd on download, pre-dating this session's numbered-suffix
+    work entirely. Fixed by keeping the full tag string through
+    `upgrade_parse_versions`/`upgrade_highest_at_level` instead of
+    stripping it early. Same fix applied to
+    `tools/generate-catalog.sh`'s `resolve_version`, which had the
+    analogous gap: its same-level tiebreak (`version_num_gt`) compared
+    only bare `X.Y.Z`, so e.g. a recorded `-alpha1` could never be
+    replaced by `-alpha2` at the same `X.Y.Z`; a new `version_number()` +
+    tiebreak closes it (`version_level`'s own glob matching already
+    tolerated numbered suffixes, so only the tiebreak was missing).
+  - **Second real bug found live**: adopting a numbered suffix
+    (`1.1.6-dev1`) immediately broke the script's own `# Version:`
+    header-parsing regex (`grep -m1 -E '^# Version: [0-9]+\.[0-9]+\.[0-9]+
+    (-[a-z]+)?$'`), which only allowed letters after the dash — every
+    invocation silently fell back to `SCRIPT_VERSION="unknown"`, caught
+    live via a `bash -n`/smoke-test pass (`container-upgrade vunknown`,
+    then an "unbound variable" crash downstream). Fixed by widening the
+    suffix group to `(-[a-z]+[0-9]*)?`. Recorded in
+    `script-maintenance-convention.md` as an implementation note so the
+    next self-upgrading script doesn't repeat it.
+- **Third real bug found live, same day**: the header-window reorder (newest
+  first, done right after the above) put a `# HELP:IDENTITY:BEGIN` marker
+  directly after the shebang, ahead of `Version:`/`Category:`/`Description:`/
+  `Upgrade-Source:` — violating
+  [[script-header-convention]]'s requirement that those four lines be the
+  literal first lines after the shebang, before *any* other header content.
+  Caught by the user asking whether the resulting line shift (`Version:`
+  moved from line 2 to 3) affected the upgrade mechanism — it didn't (every
+  reader uses `grep -m1`/`head -n <budget>`, none hardcode a line number),
+  but the marker placement was still wrong per the convention regardless.
+  Fixed by moving `HELP:IDENTITY:BEGIN` to start *after* those four lines,
+  and adding `usage_header_fields()` — a deliberate, documented exception to
+  "no line-number slicing" (`sed -n '2,5p'`), safe specifically because the
+  header convention itself pins that block's position, unlike everything
+  else marker-based extraction was introduced to stop hardcoding.
+- **Changelog consolidation for pre-release cycles (1.1.6-dev2)** — see
+  `script-maintenance-convention.md` section 3's new "Stable-only header
+  entries; consolidated in-progress entry" subsection: the header's 3-entry
+  window now shows **stable versions only**, one entry each. When the
+  running version is itself a pre-release, the window's full-detail slot
+  is a single consolidated entry for the whole cycle (e.g. `1.1.6 (in
+  progress - currently 1.1.6-dev2)`), covering every pre-release bump since
+  the last stable release (here, both `1.1.6-dev1` and `-dev2`) rewritten
+  as one description — updated in place on each further pre-release bump,
+  never adding a second header line. `CHANGELOG.md` is deliberately
+  unaffected: every bump, pre-release included, still gets its own entry
+  there (confirmed - `1.1.6-dev1` and `1.1.6-dev2` are both present as
+  separate entries). Not yet exercised: the promotion-to-stable half of the
+  rule (a stable version's `CHANGELOG.md` entry consolidating everything
+  since the previous stable release, alongside the pre-release entries
+  already there) — no cycle has reached stable since this rule was written,
+  so it remains documentation-only until one does.
+- **Cooldown-gates-remote-only promotion + permission/ownership
+  preservation (1.1.6-dev3)** — see `script-upgrade-convention.md` section
+  2's cooldown clarification and section 6's "Permission & ownership
+  preservation":
+  - **New `upgrade_prepare_cached_candidate`**: a network-free counterpart
+    to `upgrade_prepare_candidate`, called only when an implicit invocation
+    is cooldown-gated. Reads an already-cached file's own `# Version:` line
+    via new `upgrade_file_version`, checks it's actually newer than
+    `$SCRIPT_VERSION` and at or above the effective level (same gate as
+    section 3, applied locally), then calls `upgrade_select_mode` fresh
+    (always network-free, already re-evaluated every run before this
+    change too) — only succeeding if that mode has escalated past `link`.
+    `upgrade_main`'s cooldown branch now calls this before giving up;
+    `$cache_source` (the cache file's path) threads through the
+    `replacement`/`overwrite` branches as a signal to read bytes directly
+    from that file (`upgrade_write_temp_sibling_from_file`,
+    `upgrade_persist_overwrite_from_file` — both `cp`/`cat`-based, no
+    `content=$(cat ...)` round-trip through a variable, same pitfall as
+    the download path's sentinel-byte fix) instead of the normal
+    downloaded-`$content` path. No cooldown timestamp is written on this
+    path, since nothing remote was actually checked — the next implicit
+    run's schedule is untouched. `--upgrade-check`/`--upgrade-only` are
+    unaffected (both are explicit, already bypassing the cooldown
+    entirely).
+  - **New `upgrade_copy_mode_owner`** (plus `upgrade_stat_mode`/
+    `upgrade_stat_owner_group`, GNU-`stat`-first with a BSD/macOS fallback
+    verified directly against this machine's real `stat`, same pattern as
+    `parse_to_epoch`'s `date -d`/`date -j -f`): `upgrade_write_temp_sibling`
+    and its new `_from_file` sibling now copy the original file's mode bits
+    and owner:group onto the temp file before the `replacement` `mv`,
+    instead of `chmod +x` for the executable bit alone. `overwrite` needed
+    no code change — its rewrite never creates a new inode, so it already
+    preserved both by construction — but got an explanatory comment plus a
+    new `_from_file` variant for the cache-promotion path. Ownership
+    (`chown`) is best-effort, matching this convention's existing
+    best-effort philosophy elsewhere; mode bits are always applied.
+  - **Verified**: unit tests against the extracted self-upgrade function
+    block covered `upgrade_stat_mode`/`upgrade_copy_mode_owner` (mode+owner
+    copy onto a fresh file), `upgrade_write_temp_sibling`/`_from_file`
+    (permission carry-over, byte-exact content), `upgrade_file_version`,
+    and `upgrade_prepare_cached_candidate`'s three gates (no cache present,
+    mode not actually escalated past `link`, cached version below the
+    effective level, and the widened-`--upgrade-level` override) — all
+    passing as designed. A full end-to-end run against a disposable copy of
+    the real script confirmed the complete scenario this was written for:
+    with a recent cooldown timestamp (check would normally be skipped) and
+    a newer version already sitting in the `link` cache, the run still
+    promoted it straight to `replacement`, ran the trial, persisted it, and
+    the resulting live file carried over the original's exact mode (`750`)
+    and owner:group — while a matching no-cache control run left the
+    original file byte-for-byte untouched, confirming no regression to the
+    pre-existing cooldown-skip behavior.

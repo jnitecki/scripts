@@ -97,7 +97,15 @@ exactly what makes that collision possible.
 ### Pre-release version guard
 A script's `Version:` header may carry a pre-release suffix: `-dev`,
 `-alpha`, `-beta`, or `-rc` (precedence, lowest to highest:
-`dev < alpha < beta < rc < stable`, where "stable" is no suffix at all).
+`dev < alpha < beta < rc < stable`, where "stable" is no suffix at all). Per
+[[script-maintenance-convention]] section 4, the suffix may also carry a
+trailing revision number (e.g. `-dev3`); the level name is the suffix word
+with that trailing number stripped. **Not yet implemented below**: the "same
+level with strictly higher `X.Y.Z`" rule two bullets down does not yet
+account for the case of an equal `X.Y.Z` and level but a higher suffix
+number (e.g. a recorded `-alpha1` being replaced by a scanned `-alpha2` at
+the same `X.Y.Z`) — see that doc section for the intended ordering; this
+guard needs a matching update once numbered suffixes are actually adopted.
 When regenerating, the freshly-scanned version does not automatically
 overwrite what's already recorded for that (script, platform) in the
 currently-committed category file:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # generate-catalog.sh
-# Version: 2.2.0
+# Version: 2.2.1
 #
 # Scans platforms/<lang>/<script-name>/ for script files, reads their header
 # metadata (# Version / # Category / # Description comment lines), and
@@ -315,10 +315,13 @@ fi
 #   above lets a -dev version appear in the catalog.
 # - Scanned version is -alpha/-beta/-rc -> replaces the recorded entry only
 #   if the recorded entry's level is lower (progressing to a higher level
-#   always wins), or the same level with a strictly higher X.Y.Z (e.g. an
-#   existing -alpha can be replaced by a higher -alpha, but not an equal or
-#   lower one). A higher-level recorded entry (e.g. stable, or -rc versus a
-#   -alpha candidate) is never regressed.
+#   always wins), or the same level with a strictly higher X.Y.Z, or the
+#   same level and the same X.Y.Z with a strictly higher trailing revision
+#   number (docs/requirements/generic/script-maintenance-convention.md
+#   section 4 - e.g. an existing -alpha1 can be replaced by -alpha2 at the
+#   same X.Y.Z, but not by an equal or lower -alphaN). A higher-level
+#   recorded entry (e.g. stable, or -rc versus a -alpha candidate) is never
+#   regressed.
 
 version_level() {
     case "$1" in
@@ -331,6 +334,25 @@ version_level() {
 }
 
 version_base() { printf '%s' "${1%%-*}"; }
+
+# Trailing revision number on a pre-release suffix (e.g. "2" for
+# "1.2.3-alpha2"), or "0" if the suffix has none (or there is no suffix at
+# all). version_level's `*-dev*`-style glob already matches a numbered
+# suffix like "-dev2" as level 0 without help - this extracts the number
+# itself, needed by resolve_version below to break a tie between two
+# candidates at the same X.Y.Z and the same level (script-maintenance-
+# convention.md section 4): without this, "-alpha2" could never replace an
+# already-recorded "-alpha1" at the same X.Y.Z.
+version_number() {
+    case "$1" in
+        *-*) ;;
+        *) printf '0'; return ;;
+    esac
+    local suffix="${1#*-}" word n
+    word="${suffix%%[0-9]*}"
+    n="${suffix#$word}"
+    printf '%s' "${n:-0}"
+}
 
 # True (exit 0) if X.Y.Z of $1 is numerically greater than X.Y.Z of $2.
 # Deliberately not `sort -V` (a GNU coreutils extension absent from macOS's
@@ -397,8 +419,17 @@ resolve_version() {
     olevel="$(version_level "${old}")"
     if [[ "${olevel}" -lt "${clevel}" ]]; then
         printf '%s' "${candidate}"
-    elif [[ "${olevel}" -eq "${clevel}" ]] && version_num_gt "${candidate}" "${old}"; then
-        printf '%s' "${candidate}"
+    elif [[ "${olevel}" -eq "${clevel}" ]]; then
+        if version_num_gt "${candidate}" "${old}"; then
+            printf '%s' "${candidate}"
+        elif [[ "$(version_base "${candidate}")" == "$(version_base "${old}")" ]] \
+            && [[ "$(version_number "${candidate}")" -gt "$(version_number "${old}")" ]]; then
+            # Same level, same X.Y.Z - fall back to the trailing revision
+            # number as the tiebreaker (e.g. -alpha2 replaces -alpha1).
+            printf '%s' "${candidate}"
+        else
+            printf '%s' "${old}"
+        fi
     else
         printf '%s' "${old}"
     fi

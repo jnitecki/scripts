@@ -9,7 +9,11 @@ convention extends, and the exit-code rule that upgrade failures don't
 affect). The overall algorithm below is language-agnostic; see
 "Per-language blueprint" for how each language implements it. Only bash is
 implemented today — the PowerShell and Python subsections are forward-looking
-sketches to be refined when those platforms get their first script.
+sketches to be refined when those platforms get their first script. See also
+[[script-maintenance-convention]]: section 1 requires fixes to this
+mechanism to land in the blueprint first and then be replicated to every
+adopting script; section 4 extends sections 3-4 below with a numbered
+pre-release suffix (`-dev1`, `-dev2`, ...) and the ordering rule for it.
 
 ## Blueprint (plain-language summary)
 1. Unless `--upgrade-type none` (or its `--no-autoupdate` alias) was given,
@@ -19,7 +23,13 @@ sketches to be refined when those platforms get their first script.
 2. Decide whether to check at all this run: an **implicit** run (none of
    `--upgrade-type`/`--upgrade-level`/`--upgrade-check`/`--upgrade-only`
    given) is gated by a cooldown cache; any **explicit** upgrade-related
-   flag always forces a fresh check. Whether a check happened, and what it
+   flag always forces a fresh check. This cooldown only gates the *remote*
+   half of the process (steps 3-6 below) — the local apply-mode
+   determination (step 5) always runs fresh regardless, so a candidate
+   already sitting validated in the local cache from an earlier run can
+   still be promoted straight to a stronger apply mode on a cooldown-gated
+   run whose filesystem eligibility has newly changed (e.g. invoked via
+   `sudo` this time) — see section 2. Whether a check happened, and what it
    found, is always surfaced in the startup banner unless self-upgrade is
    disabled outright — see section 10.
 3. Discover every matching release tag for *this exact* script (matched by
@@ -30,7 +40,9 @@ sketches to be refined when those platforms get their first script.
    `Version:` header; stop here if there's nothing newer.
 5. Determine the strongest apply mode actually usable on this filesystem
    (`replacement` → `overwrite` → `link` → `memory`), capped by
-   `--upgrade-type` if given.
+   `--upgrade-type` if given. Re-evaluated fresh every run and never itself
+   cached, since it depends on the current process's filesystem privileges,
+   which can differ run to run (e.g. a plain invocation vs. one via `sudo`).
 6. Download the candidate file (skipped entirely for `link` mode when a
    cached copy's hash already matches — see section 7).
 7. Validate the download parses cleanly, and, best-effort, that its content
@@ -39,7 +51,10 @@ sketches to be refined when those platforms get their first script.
    do the script's actual work first (skipped for `--upgrade-only`, which
    has no "actual work" to do), and only on that run's success is the
    candidate persisted per the chosen mode (file replace, content
-   overwrite, or kept in cache) — see section 6.
+   overwrite, or kept in cache) — see section 6. `replacement`/`overwrite`
+   additionally carry over the original file's permissions and ownership
+   (ownership best-effort) rather than whatever the write happened to
+   produce — see section 6.
 9. A failure *before* any candidate is trusted enough to run for real
    (connectivity, HTTP error, parse failure, hash mismatch) abandons the
    upgrade attempt: the script proceeds with the original, already-loaded
@@ -97,6 +112,29 @@ skips the check entirely, the same as today. The cooldown timestamp is
 still written (best-effort) after an explicit check, so a later implicit
 run benefits from it.
 
+**The cooldown gates remote discovery only, never local apply-mode
+eligibility.** Even when the cooldown window above causes an implicit
+invocation to skip a fresh remote check, the script still performs the
+local, network-free half of section 6 on every single run: determine the
+strongest apply mode actually usable on this filesystem right now. If a
+previously-cached, already-validated candidate exists (a `link`-mode cache
+file per section 7) whose version is still newer than the running script's
+own, and this run's freshly-determined mode has escalated beyond what it
+was when that candidate was originally cached — e.g. the script is invoked
+via `sudo` this time, so `replacement`/`overwrite` are now reachable where
+only `link` was before — that candidate is applied via the stronger mode
+now, going through the same trial-run-then-persist model (section 8) and
+persist-time re-verification (section 6) as any other apply, skipping only
+the remote discovery/download steps (sections 3-5) since the content is
+already in hand and was already hash-validated when it was cached. A
+cooldown-skipped run that finds no such promotable candidate behaves
+exactly as before this rule existed: nothing happens, and the banner
+reports `upgrade not checked: cooldown active` (section 10). This
+eligibility re-check is never itself cached or skipped — the entire point
+is to notice a privilege/filesystem change (like a `sudo` re-invocation)
+that the cooldown timestamp, which only records *when* discovery last ran,
+has no way of knowing about.
+
 ### 3. Version & level discovery without `git`
 Tags identifying releases of a given script follow the pattern:
 ```
@@ -136,13 +174,19 @@ considers same-or-higher levels too (e.g. a running beta also accepts
 stable, but not alpha or dev, unless `--upgrade-level` explicitly widens
 that). The winner among the kept candidates is the highest by numeric
 major.minor.patch (not string comparison, so `1.10.0` correctly sorts
-after `1.9.0`); level is only a tiebreaker on an equal version number.
+after `1.9.0`); level is only a tiebreaker on an equal version number. A
+level's own name (`dev`, `alpha`, `beta`, `rc`) is parsed from the suffix
+with any trailing revision number stripped first — see
+[[script-maintenance-convention]] section 4.
 
 ### 4. Version comparison
 Highest eligible discovered version (section 3) vs. the script's own
 `Version:` header, using numeric major/minor/patch comparison. If the
 discovered version is not greater than the local one, the check ends here
-(nothing to do).
+(nothing to do). When both are numerically equal, [[script-maintenance-convention]]
+section 4 extends this comparison with a level-rank and then a
+suffix-revision-number tiebreaker, so that e.g. `1.2.3-dev2` is recognized
+as newer than the running `1.2.3-dev1`.
 
 ### 5. Download & validation (parse + content hash)
 The winning tag's copy of the script is fetched with one more HTTPS GET:
@@ -267,6 +311,28 @@ best-effort: if the expected hash was itself unavailable (section 5's
 be written, there is nothing to compare against and the check is skipped,
 not treated as a failure.
 
+**Permission & ownership preservation.** `replacement`'s temp file starts
+out owned by whatever user created it, with permissions from the
+prevailing umask — neither of which is guaranteed to match the file it's
+about to replace (e.g. a script originally installed `root:wheel` mode
+`0755`, now being upgraded by a differently-privileged process, or vice
+versa). Immediately before the `mv` that makes it live, the temp file's
+mode bits and ownership (owner and group) are copied from the original
+file's current `stat` output, so the replacement is indistinguishable from
+the original in that respect. `overwrite` rewrites the existing file's
+content in place and so does not disturb its permissions/ownership by
+default, but an implementation that stages the write through any
+intermediate copy (e.g. a scratch file, per this section's persist-time
+re-verification, whose bytes are then copied back into the original) must
+explicitly re-apply the original file's mode/ownership afterward for the
+same reason. Ownership changes (`chown`) are best-effort: a process
+without sufficient privilege (typically, not running as `root`) cannot
+change a file's owner, and failing to do so is not treated as an upgrade
+failure — the mode bits, which an unprivileged owner can always set on
+their own file, are still applied, and an ownership mismatch left in place
+is silently accepted, consistent with this convention's best-effort
+philosophy elsewhere (sections 5 and 14).
+
 ### 7. The persistent cache (link mode)
 `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/<lang>/<name>/<name>.<ext>`
 holds the most recently cached copy for a given script, used only by `link`
@@ -278,6 +344,14 @@ when it was first cached — and the cached file is used directly. On a
 miss (no cached file, a hash that differs, or a winning tag with no hash to
 compare against), a normal download proceeds and, on success, the cache
 file is (re)written.
+
+A cached file is consulted for more than just this run's own `link`-mode
+shortcut: per section 2's cooldown clarification, it also stands as a
+ready, already-validated candidate that can be promoted straight to a
+stronger mode (`replacement`/`overwrite`) on *any* run — including one
+where the cooldown window has suppressed a fresh remote check — whenever
+this run's freshly-determined filesystem eligibility (section 6) has
+newly escalated past `link`.
 
 ### 8. Trial-run-then-persist execution model
 Unlike a scheme that persists an upgrade purely on the strength of its
@@ -309,6 +383,28 @@ it's proven to work:
   to do once the child's outcome is known.
 - For `--upgrade-only`, there is no "actual work" to trial-run (see section
   12) — validated candidates are persisted directly instead.
+
+**Implementation note — a second real bug this convention's own bash
+reference implementation shipped with.** `overwrite` and `memory` both run
+the candidate as `bash -c "$content" -- "$@"`. In `bash -c
+command_string [name [args]]`, the first argument after `command_string`
+becomes the invoked script's own `$0` — so this makes the literal string
+`--` the candidate's `$0`, not merely an option-parsing separator as it
+might look. The candidate script (being a fresh copy of the same
+convention's own header logic) reads its own version off `# Version:` via
+`grep ... "$0"` near the very top of the file, before anything is ever
+printed — which then runs as `grep ... --`. GNU grep treats a trailing
+`--` with no filename after it as "end of options", not as a (nonexistent)
+filename, and falls back to reading stdin instead — which never reaches
+EOF here, hanging the entire trial run indefinitely with zero output, before
+the candidate's own startup banner (section 10) or any other line ever
+prints. This shipped undetected because earlier testing invoked candidates
+directly (a real path, not `--`) rather than through this exact `bash -c`
+form. The fix: pass `/dev/null` — a real, always-empty file — as `$0`
+instead of `--`. Any implementation using `bash -c` to run a candidate
+in-memory (`overwrite`, `memory`) needs a real (or at least
+grep/sed-option-safe) placeholder there, not a bare `--` or any other
+string a downstream option parser could mistake for a flag.
 
 **Persist-outcome reporting.** The banner note printed before a trial run
 (section 10) necessarily describes only what's being *attempted* — it
@@ -378,11 +474,12 @@ happened.
 Printed by whichever process ends up doing the script's real work this
 invocation:
 - The **original** process, when no candidate was ever trusted enough to
-  run: the check was skipped this run under the cooldown cache (section
-  14), nothing eligible was found once checked, or the
-  check/download/parse/hash-match step failed (section 9) — or, with no
-  note at all, when self-upgrade is disabled outright (`--upgrade-type
-  none` / `--no-autoupdate`), since there's nothing to report in that case.
+  run: the check was skipped this run under the cooldown cache and no
+  promotable cached candidate was found either (section 2/14), nothing
+  eligible was found once checked, or the check/download/parse/hash-match
+  step failed (section 9) — or, with no note at all, when self-upgrade is
+  disabled outright (`--upgrade-type none` / `--no-autoupdate`), since
+  there's nothing to report in that case.
 - The **candidate** itself, once selected and validated, printing its own
   banner (as the new version) before its trial run — regardless of whether
   that run goes on to succeed or fail, since the note only describes what's
@@ -465,8 +562,11 @@ read-only) directory — e.g.
 `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/<lang>_<name>.state` on
 Linux/macOS, an equivalent per-user location on Windows for PowerShell.
 Holds only the last-checked timestamp. Only gates an **implicit**
-invocation (section 2) — any explicit upgrade-related flag always forces a
-fresh check. If the cache location isn't writable, the check simply runs
+invocation's *remote* check (section 2) — any explicit upgrade-related
+flag always forces a fresh check, and even an implicit, cooldown-gated
+invocation still re-evaluates local apply-mode eligibility every time and
+may promote an already-cached candidate to a stronger mode on that basis
+(section 2). If the cache location isn't writable, the check simply runs
 every time instead of failing — the cache is an optimization, not a
 correctness requirement.
 
