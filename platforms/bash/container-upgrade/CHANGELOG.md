@@ -12,6 +12,72 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.6
+Implements the repo-wide maintenance conventions from
+`docs/requirements/generic/script-maintenance-convention.md`, plus real bugs
+found and fixed along the way. Consolidates `1.1.6-dev1` through
+`1.1.6-dev7` below into one summary:
+
+1. `--help` is now layered - bare `--help`/self-upgrade options only on
+   `--help upgrade`, both on `--help full`.
+2. Full history moved to this file; the header is trimmed to a
+   stable-versions-only window.
+3. The version-bump scheme changed - a suffixed version increments its
+   trailing number, a bare version bumps the patch and starts a fresh
+   `-dev1` cycle.
+4. Self-upgrade version comparison now strips a trailing revision number
+   before computing level and uses it as a tiebreaker when `X.Y.Z` and
+   level are equal, so consecutive same-patch pre-release tags are
+   actually recognized as upgrades - fixed alongside this,
+   `upgrade_parse_versions` no longer discards a tag's suffix, which had
+   silently broken download/hash-fetch URLs for any pre-release tag.
+5. The header's changelog window now shows stable versions only - every
+   pre-release bump since the last stable release is consolidated into
+   one running entry there instead of getting its own line, updated in
+   place on each further pre-release bump until promoted to stable, at
+   which point this file gains a matching consolidated stable entry
+   (this one) alongside the individual pre-release entries it already
+   recorded - this file itself is unaffected by that consolidation, every
+   bump, pre-release included, keeps its own entry here.
+6. The cooldown cache now only gates a fresh remote check - local
+   apply-mode eligibility is always re-evaluated, so an already-cached
+   candidate can still be promoted straight to `replacement`/`overwrite`
+   on a cooldown-gated run if that eligibility has newly escalated past
+   `link` (e.g. invoked via `sudo` this time); and `replacement`/
+   `overwrite` now explicitly carry over the original file's permissions
+   and ownership (ownership best-effort) instead of whatever the write
+   happened to produce.
+7. Safe mode now detects a container started with `--rm` (AutoRemove) and
+   falls back to simple mode for just that container, since AutoRemove
+   destroys the container the instant it's stopped, breaking the
+   rename-based rollback; `rollback()` itself no longer claims success
+   unconditionally - it now verifies the rename/start actually worked
+   before saying so.
+8. Implements the previously-pending external-restart-detection
+   requirement - both restart strategies now wait up to
+   `--external-restart-wait` seconds after stopping a container to see
+   whether systemd/Quadlet or another supervisor already recreated it,
+   and if so classify the outcome (upgraded/reverted/config-discrepancy)
+   instead of racing it with their own rename/rm/run.
+9. A container carrying Podman's `PODMAN_SYSTEMD_UNIT` label
+   (Quadlet-managed) now skips flag reconstruction and direct
+   stop/rename/run entirely - its owning unit is restarted via
+   `systemctl --user restart` and the result validated (running again, on
+   the new image, within `--external-restart-wait` seconds); only on
+   failure does it fall through to the normal simple/safe restart. New
+   `--skip-quadlet-restart` opts out.
+10. Fixed self-upgrade `overwrite`/`memory` apply modes misreporting
+    themselves as version "unknown" in their own startup banner during
+    the trial run - the `/dev/null` placeholder previously used as the
+    candidate's `$0` (1.1.4's fix for a different bug, a hang) is real
+    but empty, so its version-detection grep found no `# Version:` line
+    to read. The candidate is now run from a real scratch file containing
+    its actual content instead, so version detection finds both a real
+    filename (no hang) and real content (correct version).
+
+See the individual `1.1.6-dev1` through `1.1.6-dev7` entries below for the
+exact per-bump breakdown and any additional detail not repeated above.
+
 ## 1.1.6-dev7
 Fixes a self-upgrade bug in the `overwrite`/`memory` apply modes: the trial
 run of a candidate misreported its own version as `unknown` in the startup

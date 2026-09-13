@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.6-dev7
+# Version: 1.1.6
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -9,12 +9,12 @@
 # convention.md section 4 on every change). This window shows STABLE
 # versions only, one entry each, newest first, most recent in full - see
 # CHANGELOG.md in this same directory for the complete history, including
-# every individual pre-release entry. Since this running version is itself
-# a pre-release, the "most recent" slot below is a single consolidated
+# every individual pre-release entry. If a pre-release cycle is ever in
+# progress, the "most recent" slot instead becomes a single consolidated
 # entry for the whole in-progress cycle (every pre-release bump since the
-# last stable release, merged into one) instead of a stable entry - see
-# script-maintenance-convention.md section 3:
-#   1.1.6 (in progress - currently 1.1.6-dev7) - implements the repo-wide
+# last stable release, merged into one) until promoted back to stable -
+# see script-maintenance-convention.md section 3:
+#   1.1.6 - implements the repo-wide
 #           maintenance conventions from script-maintenance-convention.md:
 #           (1) --help is now layered - bare --help/self-upgrade options
 #           only on --help upgrade/both on --help full; (2) full history
@@ -29,9 +29,9 @@
 #           upgrade_parse_versions no longer discards a tag's suffix, which
 #           had silently broken download/hash-fetch URLs for any
 #           pre-release tag; (5) this window now shows stable versions
-#           only - every pre-release bump since the last stable release
-#           (like this entry itself) is consolidated into one running entry
-#           here instead of getting its own line, updated in place on each
+#           only - every pre-release bump since the last stable release is
+#           consolidated into one running entry here instead of getting its
+#           own line, updated in place on each
 #           further pre-release bump until promoted to stable, at which
 #           point CHANGELOG.md gains a matching consolidated stable entry
 #           alongside the individual pre-release entries it already
