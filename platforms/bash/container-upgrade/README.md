@@ -50,6 +50,31 @@ Before touching anything, each targeted container is checked for
 pre-upgrade status, plus a post-upgrade check, drives both the rollback
 policy above and the final summary report.
 
+## External-restart detection
+
+After stopping a container (either mode), the script waits up to
+`--external-restart-wait` seconds to see whether something *other than this
+script* — a systemd/Quadlet unit, another supervisor, a human — already
+restarted or recreated it. This matters because Quadlet-managed containers
+are supervised by their own systemd unit: `podman stop` typically makes the
+container exit with a non-zero status from systemd's point of view, which
+can trip a `Restart=` directive into recreating the container itself,
+racing directly against this script's own rename/remove/run steps.
+
+When a match is detected, neither restart strategy's own rename/remove/run
+logic runs at all — the outcome is classified instead, without attempting
+any rollback (an external restart means something else is actively managing
+that container's lifecycle):
+
+- **`upgraded_externally`** — it came back running the new image.
+- **`reverted_externally`** — it came back running the old image.
+- **`external_config_discrepancy`** — it came back under the same name with
+  a different runtime config than before (fixed-name case only).
+
+If nothing reappears within the wait window, the container is treated
+exactly as before this feature existed — the normal `simple`/`safe` restart
+proceeds unchanged.
+
 ## Options
 
 | Option | Description |
@@ -59,6 +84,7 @@ policy above and the final summary report.
 | `--timeout N` | Seconds to monitor the new container after starting it (default: `30`). |
 | `--precheck-seconds N` | Seconds to observe a container before touching it, to determine whether it is already crashing (default: `5`). This is a live fallback poll; see `--recent-restart-threshold` for the faster check that runs first. |
 | `--recent-restart-threshold N` | Before the live `--precheck-seconds` poll, check `RestartCount` and the timestamp of the container's most recent (re)start (not its original creation time). If it has restarted at least once and that restart happened within the last `N` seconds, or it has a healthcheck stuck in "starting" for longer than `N` seconds, it's flagged as crashing immediately — no waiting required. Default: `180` (3 minutes). |
+| `--external-restart-wait N` | Seconds to wait after stopping a container to see whether something other than this script (systemd/Quadlet, another supervisor, a human) restarts or recreates it on its own, before falling through to the normal restart. See [External-restart detection](#external-restart-detection). Default: `15`. |
 | `--skip-crashing` | Do not attempt to upgrade containers detected as already crashing before the upgrade. Default is to attempt them anyway (see policy above). |
 | `--engine docker\|podman` | Container engine to use. If omitted, auto-detects: docker if present, else podman, else errors out. |
 | `--skip-config-check` | In safe mode, skip comparing the recreated container's runtime config against the original. Use if a specific container reliably shows a diff you've already verified is harmless. |

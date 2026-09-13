@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.6-dev4
+# Version: 1.1.6-dev5
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) instead of a stable entry - see
 # script-maintenance-convention.md section 3:
-#   1.1.6 (in progress - currently 1.1.6-dev4) - implements the repo-wide
+#   1.1.6 (in progress - currently 1.1.6-dev5) - implements the repo-wide
 #           maintenance conventions from script-maintenance-convention.md:
 #           (1) --help is now layered - bare --help/self-upgrade options
 #           only on --help upgrade/both on --help full; (2) full history
@@ -51,8 +51,14 @@
 #           destroys the container the instant it's stopped, breaking the
 #           rename-based rollback; rollback() itself no longer claims
 #           success unconditionally - it now verifies the rename/start
-#           actually worked before saying so. See CHANGELOG.md for full
-#           detail on all seven.
+#           actually worked before saying so; (8) implements the
+#           previously-pending external-restart-detection requirement -
+#           both restart strategies now wait up to --external-restart-wait
+#           seconds after stopping a container to see whether systemd/
+#           Quadlet or another supervisor already recreated it, and if so
+#           classify the outcome (upgraded/reverted/config-discrepancy)
+#           instead of racing it with their own rename/rm/run. See
+#           CHANGELOG.md for full detail on all eight.
 #   1.1.5 - --help visually separates this script's own options from the
 #           self-upgrade options under two labeled groups.
 #   1.1.4 - fixed a self-upgrade hang in "overwrite"/"memory" apply modes:
@@ -90,6 +96,13 @@
 # --precheck-seconds to see whether it is already crashing. This
 # pre-upgrade status, plus a post-upgrade check, drives both the
 # rollback policy above and the final summary report.
+#
+# After stopping a container (either strategy), both wait up to
+# --external-restart-wait seconds to see whether something else - a
+# systemd/Quadlet unit, another supervisor, a human - already restarted
+# or recreated it. If so, neither strategy's own rename/remove/run steps
+# run at all; the outcome is classified instead (upgraded/reverted/config
+# mismatch) - see --help full for details.
 #
 # Requires: docker (or podman, see --engine) and jq. The run command for
 # each container is reconstructed locally from `<engine> inspect` JSON
@@ -149,6 +162,12 @@
 #                        crash loops slower than --precheck-seconds that
 #                        a live-only check could land between and miss.
 #                        Default: 180 (3 minutes).
+#   --external-restart-wait N  After stopping a container, seconds to wait
+#                        to see whether something other than this script
+#                        (systemd/Quadlet, another supervisor, a human)
+#                        restarts or recreates it on its own, before
+#                        falling through to the normal manual restart.
+#                        Default: 15.
 #   --skip-crashing     Do not attempt to upgrade containers detected as
 #                        already crashing before the upgrade. Default is
 #                        to attempt them anyway (see policy above).
@@ -227,6 +246,7 @@ MODE="safe"
 TIMEOUT=30
 PRECHECK_SECONDS=5
 RECENT_RESTART_THRESHOLD=180
+EXTERNAL_RESTART_WAIT=15
 ENGINE=""
 ENGINE_EXPLICIT=false
 RESTART_ALL=false
@@ -1406,6 +1426,9 @@ while [[ $# -gt 0 ]]; do
     --recent-restart-threshold)
       RECENT_RESTART_THRESHOLD="${2:-}"
       shift 2 ;;
+    --external-restart-wait)
+      EXTERNAL_RESTART_WAIT="${2:-}"
+      shift 2 ;;
     --engine)
       ENGINE="${2:-}"
       ENGINE_EXPLICIT=true
@@ -1697,6 +1720,79 @@ monitor_container() {
   return 0
 }
 
+# Polls up to $EXTERNAL_RESTART_WAIT seconds after a stop for evidence that
+# something other than this script (systemd/Quadlet, another supervisor, a
+# human) already recreated/restarted the container - see
+# docs/requirements/pending/external-restart-detection.md.
+#
+# Echoes one of: "" (nothing detected - fall through to the normal manual
+# restart), "upgraded_externally", "reverted_externally",
+# "external_config_discrepancy". For an auto-generated-name success match,
+# also removes the leftover original container (mirrors safe mode's own
+# old-container cleanup).
+detect_external_restart() {
+  local name="$1" pre_fingerprint="$2" old_id="$3" new_id="$4"
+  local auto_name_re='^[a-z][a-z0-9]*_[a-z][a-z0-9]*$'
+  local is_auto_name=false
+  [[ "$name" =~ $auto_name_re ]] && is_auto_name=true
+
+  local pre_ids=$'\n'
+  if $is_auto_name; then
+    while IFS= read -r id || [[ -n "$id" ]]; do
+      [[ -n "$id" ]] && pre_ids+="$id"$'\n'
+    done < <($ENGINE ps -a --format '{{.ID}}')
+  fi
+
+  local waited=0
+  while [[ "$waited" -lt "$EXTERNAL_RESTART_WAIT" ]]; do
+    sleep 1
+    waited=$((waited + 1))
+
+    if ! $is_auto_name; then
+      # Fixed name: reappearance under the exact original name is itself
+      # the signal - the engine never lets two containers share a name.
+      if [[ "$($ENGINE inspect --format '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]]; then
+        local cur_fp cur_id
+        cur_fp=$(normalized_config "$name")
+        if [[ "$cur_fp" != "$pre_fingerprint" ]]; then
+          echo "external_config_discrepancy"
+          return 0
+        fi
+        cur_id=$($ENGINE inspect --format '{{.Image}}' "$name" 2>/dev/null)
+        if [[ "$cur_id" == "$new_id" ]]; then
+          echo "upgraded_externally"
+        else
+          echo "reverted_externally"
+        fi
+        return 0
+      fi
+    else
+      # Auto-generated original name: an external recreate isn't obliged
+      # to reuse it, so look for any brand-new container of the same
+      # name shape whose fingerprint matches the pre-stop original.
+      local id
+      while IFS= read -r id || [[ -n "$id" ]]; do
+        [[ -z "$id" ]] && continue
+        [[ "$pre_ids" == *$'\n'"$id"$'\n'* ]] && continue
+        local cname
+        cname=$($ENGINE inspect --format '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')
+        [[ "$cname" =~ $auto_name_re ]] || continue
+        [[ "$(normalized_config "$id")" == "$pre_fingerprint" ]] || continue
+        local cid
+        cid=$($ENGINE inspect --format '{{.Image}}' "$id" 2>/dev/null)
+        if [[ "$cid" == "$new_id" ]]; then
+          $ENGINE rm -f "$name" >/dev/null 2>&1 || true
+          echo "upgraded_externally"
+        else
+          echo "reverted_externally"
+        fi
+        return 0
+      done < <($ENGINE ps -a --format '{{.ID}}')
+    fi
+  done
+  echo ""
+}
+
 # Parses an RFC3339 timestamp (as reported by Docker/Podman, e.g.
 # "2026-09-05T04:20:59.123456789Z") into a Unix epoch. Tries GNU date
 # first, then falls back to BSD/macOS date syntax for portability.
@@ -1838,9 +1934,10 @@ record_restart_policy_issue() {
 # ---------------------------------------------------------------------------
 
 restart_simple() {
-  local name="$1" run_cmd="$2" auto_remove="${3:-false}"
-  local orig_policy
+  local name="$1" run_cmd="$2" auto_remove="${3:-false}" old_id="$4" new_id="$5"
+  local orig_policy pre_fingerprint outcome
   orig_policy=$(get_restart_policy "$name")
+  pre_fingerprint=$(normalized_config "$name")
 
   if [[ "$orig_policy" == "always" ]]; then
     log "  [simple] Restart policy is 'always' - relaxing to 'unless-stopped' before stopping..."
@@ -1850,6 +1947,18 @@ restart_simple() {
 
   log "  [simple] Stopping $name..."
   $ENGINE stop "$name" >/dev/null
+
+  outcome=$(detect_external_restart "$name" "$pre_fingerprint" "$old_id" "$new_id")
+  if [[ -n "$outcome" ]]; then
+    err "  [simple] $name was restarted/recreated externally during the upgrade" \
+        "(not by this script) - classified as: $outcome. No further action taken."
+    if [[ "$orig_policy" == "always" ]]; then
+      set_restart_policy "$name" "always" \
+        || record_restart_policy_issue "$name" "could not restore policy to 'always' after external-restart detection: $RESTART_POLICY_ERROR"
+    fi
+    EXTERNAL_RESTART_OUTCOME="$outcome"
+    return 0
+  fi
 
   if [[ "$auto_remove" == "true" ]]; then
     log "  [simple] AutoRemove is set; $name was already removed by stop."
@@ -1878,9 +1987,9 @@ restart_simple() {
 #       container is left renamed aside rather than deleted, in case
 #       manual recovery is wanted
 restart_safe() {
-  local name="$1" run_cmd="$2" allow_rollback="$3"
+  local name="$1" run_cmd="$2" allow_rollback="$3" old_id="$4" new_id="$5"
   local old_name="${name}_old_$(date +%s)"
-  local old_fingerprint new_fingerprint diff_output
+  local old_fingerprint new_fingerprint diff_output outcome
   local orig_policy
 
   rollback() {
@@ -1931,6 +2040,18 @@ restart_safe() {
 
   log "  [safe] Stopping $name..."
   $ENGINE stop "$name" >/dev/null
+
+  outcome=$(detect_external_restart "$name" "$old_fingerprint" "$old_id" "$new_id")
+  if [[ -n "$outcome" ]]; then
+    err "  [safe] $name was restarted/recreated externally during the upgrade" \
+        "(not by this script) - classified as: $outcome. No further action taken."
+    if [[ "$orig_policy" == "always" ]]; then
+      set_restart_policy "$name" "always" \
+        || record_restart_policy_issue "$name" "could not restore policy to 'always' after external-restart detection: $RESTART_POLICY_ERROR"
+    fi
+    EXTERNAL_RESTART_OUTCOME="$outcome"
+    return 0
+  fi
 
   log "  [safe] Renaming $name -> $old_name..."
   $ENGINE rename "$name" "$old_name"
@@ -2159,42 +2280,50 @@ for name in "${CONTAINERS[@]}"; do
   allow_rollback="true"
   [[ "$pre_status" == "crashing" ]] && allow_rollback="false"
 
+  old_id="$(map_get OLD_ID_OF "$name")"
+  new_id="$(map_get NEW_ID_OF_IMAGE "$image")"
+  EXTERNAL_RESTART_OUTCOME=""
+
   if [[ "$mode" == "simple" ]]; then
-    restart_simple "$name" "$run_cmd" "$auto_remove"
+    restart_simple "$name" "$run_cmd" "$auto_remove" "$old_id" "$new_id"
   else
     rc=0
-    restart_safe "$name" "$run_cmd" "$allow_rollback" || rc=$?
+    restart_safe "$name" "$run_cmd" "$allow_rollback" "$old_id" "$new_id" || rc=$?
   fi
 
-  if is_running_and_healthy "$name"; then
-    final_status="healthy"
+  if [[ -n "$EXTERNAL_RESTART_OUTCOME" ]]; then
+    map_set RESULT "$name" "$EXTERNAL_RESTART_OUTCOME"
   else
-    final_status="failing"
-  fi
+    if is_running_and_healthy "$name"; then
+      final_status="healthy"
+    else
+      final_status="failing"
+    fi
 
-  if [[ "$pre_status" == "healthy" ]]; then
-    if [[ "$final_status" == "healthy" ]]; then
-      if [[ "$mode" == "safe" && "${rc:-0}" -eq 2 ]]; then
-        map_set RESULT "$name" rolled_back_working
-      elif [[ "$(map_get_default CONTAINER_CHANGED "$name" false)" == "true" ]]; then
-        map_set RESULT "$name" upgraded
+    if [[ "$pre_status" == "healthy" ]]; then
+      if [[ "$final_status" == "healthy" ]]; then
+        if [[ "$mode" == "safe" && "${rc:-0}" -eq 2 ]]; then
+          map_set RESULT "$name" rolled_back_working
+        elif [[ "$(map_get_default CONTAINER_CHANGED "$name" false)" == "true" ]]; then
+          map_set RESULT "$name" upgraded
+        else
+          map_set RESULT "$name" restarted
+        fi
       else
-        map_set RESULT "$name" restarted
+        map_set RESULT "$name" now_failing
       fi
     else
-      map_set RESULT "$name" now_failing
-    fi
-  else
-    if [[ "$final_status" == "healthy" ]]; then
-      map_set RESULT "$name" recovered
-    else
-      map_set RESULT "$name" still_failing
+      if [[ "$final_status" == "healthy" ]]; then
+        map_set RESULT "$name" recovered
+      else
+        map_set RESULT "$name" still_failing
+      fi
     fi
   fi
 
   result="$(map_get RESULT "$name")"
   case "$result" in
-    now_failing|still_failing)
+    now_failing|still_failing|reverted_externally|external_config_discrepancy)
       err "  Final classification for $name: $result" ;;
     *)
       log "  Final classification for $name: $result" ;;
@@ -2245,6 +2374,9 @@ count_still_failing=0
 count_pull_failed=0
 count_reconstruct_failed=0
 count_skipped_crashing=0
+count_upgraded_externally=0
+count_reverted_externally=0
+count_external_config_discrepancy=0
 
 # See the VALID_CONTAINERS comment above for why "[@]+...[@]" is needed:
 # ATTEMPTED_ORDER is legitimately empty when every container is already
@@ -2260,6 +2392,9 @@ for name in "${ATTEMPTED_ORDER[@]+"${ATTEMPTED_ORDER[@]}"}"; do
     pull_failed) count_pull_failed=$((count_pull_failed + 1)) ;;
     reconstruct_failed) count_reconstruct_failed=$((count_reconstruct_failed + 1)) ;;
     skipped_crashing) count_skipped_crashing=$((count_skipped_crashing + 1)) ;;
+    upgraded_externally) count_upgraded_externally=$((count_upgraded_externally + 1)) ;;
+    reverted_externally) count_reverted_externally=$((count_reverted_externally + 1)) ;;
+    external_config_discrepancy) count_external_config_discrepancy=$((count_external_config_discrepancy + 1)) ;;
   esac
 done
 
@@ -2284,6 +2419,12 @@ if [[ $count_pull_failed -gt 0 || $count_reconstruct_failed -gt 0 ]]; then
   err "(also: $count_pull_failed image-pull-failed, $count_reconstruct_failed reconstruct-failed, $count_skipped_crashing skipped-crashing - not counted above)"
 elif [[ $count_skipped_crashing -gt 0 ]]; then
   log "(also: $count_pull_failed image-pull-failed, $count_reconstruct_failed reconstruct-failed, $count_skipped_crashing skipped-crashing - not counted above)"
+fi
+if [[ $((count_upgraded_externally + count_reverted_externally + count_external_config_discrepancy)) -gt 0 ]]; then
+  log "Containers upgraded externally (by systemd/Quadlet or another supervisor, not this script): $count_upgraded_externally"
+  if [[ $((count_reverted_externally + count_external_config_discrepancy)) -gt 0 ]]; then
+    err "Containers where an external restart reverted to the old image or showed a config mismatch: $((count_reverted_externally + count_external_config_discrepancy))"
+  fi
 fi
 
 echo ""
@@ -2312,10 +2453,13 @@ status_label() {
     pull_failed) echo "Image pull failed (not attempted)" ;;
     reconstruct_failed) echo "Could not reconstruct run command (not attempted)" ;;
     skipped_crashing) echo "Skipped (was crashing, --skip-crashing set)" ;;
+    upgraded_externally) echo "Upgraded externally (systemd/Quadlet or another supervisor restarted it)" ;;
+    reverted_externally) echo "Restarted externally but reverted to the old image" ;;
+    external_config_discrepancy) echo "Restarted externally with a mismatched config" ;;
   esac
 }
-STATUS_ORDER=(upgraded restarted rolled_back_working recovered now_failing still_failing pull_failed reconstruct_failed skipped_crashing)
-ERROR_STATUSES=(now_failing still_failing pull_failed reconstruct_failed)
+STATUS_ORDER=(upgraded restarted rolled_back_working recovered now_failing still_failing pull_failed reconstruct_failed skipped_crashing upgraded_externally reverted_externally external_config_discrepancy)
+ERROR_STATUSES=(now_failing still_failing pull_failed reconstruct_failed reverted_externally external_config_discrepancy)
 
 is_error_status() {
   local s="$1"
