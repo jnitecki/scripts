@@ -12,9 +12,49 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.6-dev6
+Implements
+[docs/requirements/implemented/quadlet-managed-restart.md](docs/requirements/implemented/quadlet-managed-restart.md).
+Companion to the dev5 external-restart-detection work below, but for the
+case where the script knows *in advance* a container is Quadlet-managed
+(via its `PODMAN_SYSTEMD_UNIT` label) and can cooperate proactively with
+systemd instead of only detecting after the fact:
+
+1. New `get_quadlet_unit()` reads a container's `PODMAN_SYSTEMD_UNIT` label
+   (empty if absent). New `restart_via_quadlet()` restarts such a container
+   via `systemctl --user restart <unit>` instead of stopping/reconstructing
+   it directly, then polls up to `--external-restart-wait` seconds (the
+   same setting/default `detect_external_restart` already uses, no new
+   option for the wait itself) for both the unit reporting `active` and a
+   same-named running container on the newly-pulled image.
+2. This path runs regardless of `--mode`, and unconditionally skips: flag
+   reconstruction feeding an actual restart (still attempted for every
+   container as before, but no longer required up front for a
+   Quadlet-managed one), the direct `stop`/`rename`/`run` steps, the 1.1.3
+   restart-policy relax/restore (no direct stop happens here, so that race
+   doesn't open), and any `normalized_config` diff (the new container comes
+   entirely from Quadlet's `.container` file, not from this script's own
+   reconstruction, so there's nothing of this script's to diff against).
+3. On success, the outcome is reported as a new `upgraded_via_quadlet`
+   category - deliberately distinct from dev5's `upgraded_externally`,
+   since this one is an action the script itself took, not a passively
+   detected third party. On any other result (the `systemctl` call itself
+   failing, the unit never becoming active, or the container coming back
+   still on the old image), the container falls through to the exact
+   `restart_simple`/`restart_safe` path used today, unchanged - the
+   specific failure reason is only logged, not classified separately, since
+   every reason leads to the same fallback.
+4. A container whose run-command reconstruction fails now still gets the
+   Quadlet attempt if it carries the label - `reconstruct_failed` only
+   fires if that attempt also doesn't succeed and there's no reconstructed
+   command left to fall back with (previously, a reconstruction failure
+   skipped the container immediately, before any restart was attempted).
+5. New `--skip-quadlet-restart` opts a run out of this path entirely,
+   restoring today's behavior for labeled containers.
+
 ## 1.1.6-dev5
 Implements
-[docs/requirements/pending/external-restart-detection.md](docs/requirements/pending/external-restart-detection.md),
+[docs/requirements/implemented/external-restart-detection.md](docs/requirements/implemented/external-restart-detection.md),
 a fully-speced requirement that had never actually been wired into the
 script. Triggered by an incident where Quadlet-managed `nginx`/`postgres`
 containers failed upgrades with the same storage-race errors seen in the

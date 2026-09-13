@@ -75,6 +75,28 @@ If nothing reappears within the wait window, the container is treated
 exactly as before this feature existed — the normal `simple`/`safe` restart
 proceeds unchanged.
 
+## Quadlet-managed restart
+
+A container carrying Podman's `PODMAN_SYSTEMD_UNIT` label (i.e. started by
+Quadlet) is restarted differently from the above: instead of reconstructing
+its flags or stopping/renaming/running it directly, the script restarts its
+owning systemd unit with `systemctl --user restart <unit>` and validates
+the result — polling up to `--external-restart-wait` seconds (the same
+setting used by external-restart detection) for the unit to report active
+and a same-named container to come back running on the newly-pulled image.
+
+This applies regardless of `--mode`, and skips the normal restart entirely
+when it succeeds — no flag reconstruction is required up front, the
+container is never stopped directly, and there's no config diff against
+the original (Quadlet rebuilds the container from its own `.container`
+file, not from anything this script generated).
+
+If the `systemctl` restart doesn't succeed within the wait window — the
+command itself failed, the unit never became active, or the container came
+back still on the old image — the container falls through to the normal
+`simple`/`safe` restart above, unchanged. Use `--skip-quadlet-restart` to
+disable this path and manage such containers like any other.
+
 ## Options
 
 | Option | Description |
@@ -84,7 +106,8 @@ proceeds unchanged.
 | `--timeout N` | Seconds to monitor the new container after starting it (default: `30`). |
 | `--precheck-seconds N` | Seconds to observe a container before touching it, to determine whether it is already crashing (default: `5`). This is a live fallback poll; see `--recent-restart-threshold` for the faster check that runs first. |
 | `--recent-restart-threshold N` | Before the live `--precheck-seconds` poll, check `RestartCount` and the timestamp of the container's most recent (re)start (not its original creation time). If it has restarted at least once and that restart happened within the last `N` seconds, or it has a healthcheck stuck in "starting" for longer than `N` seconds, it's flagged as crashing immediately — no waiting required. Default: `180` (3 minutes). |
-| `--external-restart-wait N` | Seconds to wait after stopping a container to see whether something other than this script (systemd/Quadlet, another supervisor, a human) restarts or recreates it on its own, before falling through to the normal restart. See [External-restart detection](#external-restart-detection). Default: `15`. |
+| `--external-restart-wait N` | Seconds to wait after stopping a container to see whether something other than this script (systemd/Quadlet, another supervisor, a human) restarts or recreates it on its own, before falling through to the normal restart. Also the wait used to validate a Quadlet-managed restart (see below). See [External-restart detection](#external-restart-detection). Default: `15`. |
+| `--skip-quadlet-restart` | Do not use `systemctl --user restart` for a container managed by Podman Quadlet (`PODMAN_SYSTEMD_UNIT` label present); manage it like any other container instead. See [Quadlet-managed restart](#quadlet-managed-restart). Default: off (Quadlet-managed containers use `systemctl`). |
 | `--skip-crashing` | Do not attempt to upgrade containers detected as already crashing before the upgrade. Default is to attempt them anyway (see policy above). |
 | `--engine docker\|podman` | Container engine to use. If omitted, auto-detects: docker if present, else podman, else errors out. |
 | `--skip-config-check` | In safe mode, skip comparing the recreated container's runtime config against the original. Use if a specific container reliably shows a diff you've already verified is harmless. |

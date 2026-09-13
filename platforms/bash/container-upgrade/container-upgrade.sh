@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.6-dev5
+# Version: 1.1.6-dev6
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) instead of a stable entry - see
 # script-maintenance-convention.md section 3:
-#   1.1.6 (in progress - currently 1.1.6-dev5) - implements the repo-wide
+#   1.1.6 (in progress - currently 1.1.6-dev6) - implements the repo-wide
 #           maintenance conventions from script-maintenance-convention.md:
 #           (1) --help is now layered - bare --help/self-upgrade options
 #           only on --help upgrade/both on --help full; (2) full history
@@ -57,8 +57,15 @@
 #           seconds after stopping a container to see whether systemd/
 #           Quadlet or another supervisor already recreated it, and if so
 #           classify the outcome (upgraded/reverted/config-discrepancy)
-#           instead of racing it with their own rename/rm/run. See
-#           CHANGELOG.md for full detail on all eight.
+#           instead of racing it with their own rename/rm/run; (9) a
+#           container carrying Podman's PODMAN_SYSTEMD_UNIT label
+#           (Quadlet-managed) now skips flag reconstruction and direct
+#           stop/rename/run entirely - its owning unit is restarted via
+#           `systemctl --user restart` and the result validated (running
+#           again, on the new image, within --external-restart-wait
+#           seconds); only on failure does it fall through to the normal
+#           simple/safe restart. New `--skip-quadlet-restart` opts out.
+#           See CHANGELOG.md for full detail on all nine.
 #   1.1.5 - --help visually separates this script's own options from the
 #           self-upgrade options under two labeled groups.
 #   1.1.4 - fixed a self-upgrade hang in "overwrite"/"memory" apply modes:
@@ -103,6 +110,14 @@
 # or recreated it. If so, neither strategy's own rename/remove/run steps
 # run at all; the outcome is classified instead (upgraded/reverted/config
 # mismatch) - see --help full for details.
+#
+# A container carrying Podman's PODMAN_SYSTEMD_UNIT label (i.e. started by
+# Quadlet) skips flag reconstruction and direct stop/rename/run entirely -
+# instead its owning unit is restarted via `systemctl --user restart`, then
+# validated the same way (running again, on the new image, within
+# --external-restart-wait seconds). Only if that doesn't succeed does the
+# container fall through to the normal simple/safe restart above. See
+# --skip-quadlet-restart to opt out.
 #
 # Requires: docker (or podman, see --engine) and jq. The run command for
 # each container is reconstructed locally from `<engine> inspect` JSON
@@ -168,6 +183,12 @@
 #                        restarts or recreates it on its own, before
 #                        falling through to the normal manual restart.
 #                        Default: 15.
+#   --skip-quadlet-restart  Do not use systemctl to restart a container
+#                        managed by Podman Quadlet (PODMAN_SYSTEMD_UNIT
+#                        label present); manage it like any other
+#                        container instead (existing simple/safe
+#                        behavior). Default: off (Quadlet-managed
+#                        containers use systemctl).
 #   --skip-crashing     Do not attempt to upgrade containers detected as
 #                        already crashing before the upgrade. Default is
 #                        to attempt them anyway (see policy above).
@@ -247,6 +268,7 @@ TIMEOUT=30
 PRECHECK_SECONDS=5
 RECENT_RESTART_THRESHOLD=180
 EXTERNAL_RESTART_WAIT=15
+SKIP_QUADLET_RESTART=false
 ENGINE=""
 ENGINE_EXPLICIT=false
 RESTART_ALL=false
@@ -1429,6 +1451,7 @@ while [[ $# -gt 0 ]]; do
     --external-restart-wait)
       EXTERNAL_RESTART_WAIT="${2:-}"
       shift 2 ;;
+    --skip-quadlet-restart) SKIP_QUADLET_RESTART=true; shift ;;
     --engine)
       ENGINE="${2:-}"
       ENGINE_EXPLICIT=true
@@ -1723,7 +1746,7 @@ monitor_container() {
 # Polls up to $EXTERNAL_RESTART_WAIT seconds after a stop for evidence that
 # something other than this script (systemd/Quadlet, another supervisor, a
 # human) already recreated/restarted the container - see
-# docs/requirements/pending/external-restart-detection.md.
+# docs/requirements/implemented/external-restart-detection.md.
 #
 # Echoes one of: "" (nothing detected - fall through to the normal manual
 # restart), "upgraded_externally", "reverted_externally",
@@ -1927,6 +1950,73 @@ record_restart_policy_issue() {
   local name="$1" detail="$2"
   err "  Restart-policy safety step failed for $name: $detail"
   RESTART_POLICY_ISSUES+=("$name: $detail")
+}
+
+# ---------------------------------------------------------------------------
+# Quadlet-managed restart
+# ---------------------------------------------------------------------------
+#
+# A container started by Podman Quadlet carries a PODMAN_SYSTEMD_UNIT label
+# naming the systemd unit that owns its lifecycle - the container itself is
+# really a side effect of that unit being active. Reconstructing/reapplying
+# its flags or stopping it directly (as the strategies below do) would race
+# systemd rather than cooperate with it, so such a container is instead
+# restarted by asking its own unit to restart - see
+# docs/requirements/implemented/quadlet-managed-restart.md.
+
+# Echoes $1's PODMAN_SYSTEMD_UNIT label value, or empty if unset/absent.
+# Uses the same JSON-dump-then-jq pattern as normalized_config rather than a
+# Go-template lookup, since `{{index .Config.Labels "..."}}` errors out on a
+# missing key instead of returning empty.
+get_quadlet_unit() {
+  local name="$1"
+  $ENGINE inspect --format '{{json .Config.Labels}}' "$name" 2>/dev/null | jq -r '.PODMAN_SYSTEMD_UNIT // empty'
+}
+
+# Restarts a Quadlet-managed container ($1, owning unit $2) via
+# `systemctl --user restart` instead of managing it directly. Unlike
+# detect_external_restart, this script is deliberately initiating the
+# restart, not passively detecting one initiated elsewhere: no direct stop
+# happens here (so the 1.1.3 restart-policy relax/restore doesn't apply to
+# this attempt), and there is no normalized_config diff (the new container
+# is produced entirely by Quadlet from its .container unit file - nothing
+# this script generated to diff against).
+#
+# Echoes "upgraded_via_quadlet" on success. Echoes "" if it did not succeed
+# (the systemctl call itself failed, the unit never became active, the
+# container never came back running, or it came back still on the old
+# image) - the caller falls through to the normal restart_simple/
+# restart_safe path unchanged in that case; the specific reason is only
+# logged, not classified, since every such reason leads to the same
+# fallback action.
+restart_via_quadlet() {
+  local name="$1" unit="$2" new_id="$3"
+  local out waited cur_id
+
+  log "  [quadlet] $name is managed by systemd unit '$unit' - restarting via 'systemctl --user restart' instead of managing it directly..."
+  if ! out=$(systemctl --user restart "$unit" 2>&1); then
+    log "  [quadlet] 'systemctl --user restart $unit' failed: $out"
+    echo ""
+    return 0
+  fi
+
+  waited=0
+  while [[ "$waited" -lt "$EXTERNAL_RESTART_WAIT" ]]; do
+    sleep 1
+    waited=$((waited + 1))
+    if [[ "$(systemctl --user is-active "$unit" 2>/dev/null)" == "active" ]] \
+       && [[ "$($ENGINE inspect --format '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]]; then
+      cur_id=$($ENGINE inspect --format '{{.Image}}' "$name" 2>/dev/null)
+      if [[ "$cur_id" == "$new_id" ]]; then
+        log "  [quadlet] $name is running again on the new image after ${waited}s."
+        echo "upgraded_via_quadlet"
+        return 0
+      fi
+    fi
+  done
+
+  log "  [quadlet] $name did not come back running on the new image within ${EXTERNAL_RESTART_WAIT}s - falling back to the normal restart path."
+  echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -2252,7 +2342,11 @@ for name in "${CONTAINERS[@]}"; do
 
   log "  Capturing current run command..."
   run_cmd=$(get_run_command "$name" "$image")
-  if [[ -z "$run_cmd" ]]; then
+
+  quadlet_unit=""
+  $SKIP_QUADLET_RESTART || quadlet_unit="$(get_quadlet_unit "$name")"
+
+  if [[ -z "$run_cmd" && -z "$quadlet_unit" ]]; then
     err "  Failed to capture run command for $name, skipping to avoid data loss."
     map_set RESULT "$name" reconstruct_failed
     ATTEMPTED_ORDER+=("$name")
@@ -2269,8 +2363,14 @@ for name in "${CONTAINERS[@]}"; do
   fi
 
   if $DRY_RUN; then
-    log "  [dry-run] Would restart $name in $mode mode (pre-status: $pre_status) with:"
-    log "    $run_cmd"
+    if [[ -n "$quadlet_unit" ]]; then
+      log "  [dry-run] Would restart $name via Quadlet (systemctl --user restart $quadlet_unit)," \
+          "falling back to $mode mode if that doesn't succeed."
+      [[ -n "$run_cmd" ]] && log "    $run_cmd"
+    else
+      log "  [dry-run] Would restart $name in $mode mode (pre-status: $pre_status) with:"
+      log "    $run_cmd"
+    fi
     map_set RESULT "$name" dry_run
     ATTEMPTED_ORDER+=("$name")
     continue
@@ -2284,11 +2384,28 @@ for name in "${CONTAINERS[@]}"; do
   new_id="$(map_get NEW_ID_OF_IMAGE "$image")"
   EXTERNAL_RESTART_OUTCOME=""
 
-  if [[ "$mode" == "simple" ]]; then
-    restart_simple "$name" "$run_cmd" "$auto_remove" "$old_id" "$new_id"
-  else
-    rc=0
-    restart_safe "$name" "$run_cmd" "$allow_rollback" "$old_id" "$new_id" || rc=$?
+  quadlet_succeeded=false
+  if [[ -n "$quadlet_unit" ]]; then
+    outcome=$(restart_via_quadlet "$name" "$quadlet_unit" "$new_id")
+    if [[ "$outcome" == "upgraded_via_quadlet" ]]; then
+      EXTERNAL_RESTART_OUTCOME="$outcome"
+      quadlet_succeeded=true
+    fi
+  fi
+
+  if ! $quadlet_succeeded; then
+    if [[ -z "$run_cmd" ]]; then
+      err "  Failed to capture run command for $name, and the Quadlet restart" \
+          "did not succeed either - skipping to avoid data loss."
+      map_set RESULT "$name" reconstruct_failed
+      continue
+    fi
+    if [[ "$mode" == "simple" ]]; then
+      restart_simple "$name" "$run_cmd" "$auto_remove" "$old_id" "$new_id"
+    else
+      rc=0
+      restart_safe "$name" "$run_cmd" "$allow_rollback" "$old_id" "$new_id" || rc=$?
+    fi
   fi
 
   if [[ -n "$EXTERNAL_RESTART_OUTCOME" ]]; then
@@ -2377,6 +2494,7 @@ count_skipped_crashing=0
 count_upgraded_externally=0
 count_reverted_externally=0
 count_external_config_discrepancy=0
+count_upgraded_via_quadlet=0
 
 # See the VALID_CONTAINERS comment above for why "[@]+...[@]" is needed:
 # ATTEMPTED_ORDER is legitimately empty when every container is already
@@ -2395,6 +2513,7 @@ for name in "${ATTEMPTED_ORDER[@]+"${ATTEMPTED_ORDER[@]}"}"; do
     upgraded_externally) count_upgraded_externally=$((count_upgraded_externally + 1)) ;;
     reverted_externally) count_reverted_externally=$((count_reverted_externally + 1)) ;;
     external_config_discrepancy) count_external_config_discrepancy=$((count_external_config_discrepancy + 1)) ;;
+    upgraded_via_quadlet) count_upgraded_via_quadlet=$((count_upgraded_via_quadlet + 1)) ;;
   esac
 done
 
@@ -2426,6 +2545,9 @@ if [[ $((count_upgraded_externally + count_reverted_externally + count_external_
     err "Containers where an external restart reverted to the old image or showed a config mismatch: $((count_reverted_externally + count_external_config_discrepancy))"
   fi
 fi
+if [[ $count_upgraded_via_quadlet -gt 0 ]]; then
+  log "Containers upgraded via Quadlet (systemctl --user restart, initiated by this script): $count_upgraded_via_quadlet"
+fi
 
 echo ""
 log "Images upgraded:"
@@ -2456,9 +2578,10 @@ status_label() {
     upgraded_externally) echo "Upgraded externally (systemd/Quadlet or another supervisor restarted it)" ;;
     reverted_externally) echo "Restarted externally but reverted to the old image" ;;
     external_config_discrepancy) echo "Restarted externally with a mismatched config" ;;
+    upgraded_via_quadlet) echo "Upgraded via Quadlet (systemctl --user restart, initiated by this script)" ;;
   esac
 }
-STATUS_ORDER=(upgraded restarted rolled_back_working recovered now_failing still_failing pull_failed reconstruct_failed skipped_crashing upgraded_externally reverted_externally external_config_discrepancy)
+STATUS_ORDER=(upgraded restarted rolled_back_working recovered now_failing still_failing pull_failed reconstruct_failed skipped_crashing upgraded_externally reverted_externally external_config_discrepancy upgraded_via_quadlet)
 ERROR_STATUSES=(now_failing still_failing pull_failed reconstruct_failed reverted_externally external_config_discrepancy)
 
 is_error_status() {
