@@ -12,6 +12,37 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.6-dev4
+Fixes an incident where a container started with `--rm` (AutoRemove) broke
+safe mode's rename-based rollback entirely, and a pre-existing bug in
+`rollback()` masked the resulting failure as a false success:
+
+1. New `get_auto_remove()` inspects `HostConfig.AutoRemove`. The main loop
+   now checks it per container, before dispatch: if `--mode safe` was
+   requested but a given container has AutoRemove set, that container alone
+   is downgraded to `simple` mode for this run (every other targeted
+   container keeps using the requested mode). AutoRemove containers are
+   destroyed by the engine the instant `stop` returns, so `restart_safe`'s
+   rename-then-rollback strategy can never work for them: `rename` fails
+   outright with "no such container," and the subsequent `run` for the new
+   container races the engine's own async removal/storage teardown, which
+   can surface as confusing storage errors ("Storage for container ... has
+   been removed", "container not known") on an otherwise-unrelated new
+   container.
+2. `restart_simple()` now takes an `auto_remove` flag and skips its own
+   explicit `$ENGINE rm` step when set, since the container is already gone
+   by the time `stop` returns — calling `rm` on it would just produce a
+   spurious "no such container" error.
+3. `rollback()` no longer assumes success: it now checks the exit codes of
+   `$ENGINE rename "$old_name" "$name"` and `$ENGINE start "$name"` and only
+   logs `"Rolled back, $name restored and started."` when both actually
+   succeeded. Previously it printed that message unconditionally, which
+   incident review found gives a false-positive "recovered" impression even
+   when neither command found a container to act on — the real failure was
+   only visible later, in the final health classification. On failure it
+   now reports `"ROLLBACK FAILED"` with the container names involved, for
+   manual recovery.
+
 ## 1.1.6-dev3
 Implements two clarifications added to
 `docs/requirements/generic/script-upgrade-convention.md`:

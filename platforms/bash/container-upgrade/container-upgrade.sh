@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.6-dev3
+# Version: 1.1.6-dev4
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) instead of a stable entry - see
 # script-maintenance-convention.md section 3:
-#   1.1.6 (in progress - currently 1.1.6-dev3) - implements the repo-wide
+#   1.1.6 (in progress - currently 1.1.6-dev4) - implements the repo-wide
 #           maintenance conventions from script-maintenance-convention.md:
 #           (1) --help is now layered - bare --help/self-upgrade options
 #           only on --help upgrade/both on --help full; (2) full history
@@ -45,8 +45,14 @@
 #           "link" (e.g. invoked via sudo this time); and "replacement"/
 #           "overwrite" now explicitly carry over the original file's
 #           permissions and ownership (ownership best-effort) instead of
-#           whatever the write happened to produce. See CHANGELOG.md for
-#           full detail on all six.
+#           whatever the write happened to produce; (7) safe mode now
+#           detects a container started with --rm (AutoRemove) and falls
+#           back to simple mode for just that container, since AutoRemove
+#           destroys the container the instant it's stopped, breaking the
+#           rename-based rollback; rollback() itself no longer claims
+#           success unconditionally - it now verifies the rename/start
+#           actually worked before saying so. See CHANGELOG.md for full
+#           detail on all seven.
 #   1.1.5 - --help visually separates this script's own options from the
 #           self-upgrade options under two labeled groups.
 #   1.1.4 - fixed a self-upgrade hang in "overwrite"/"memory" apply modes:
@@ -75,7 +81,10 @@
 #             container was already crashing before the upgrade, it is
 #             NOT rolled back even if it is still failing on the new
 #             image (see --skip-crashing to opt out of attempting these
-#             at all instead).
+#             at all instead). A container started with --rm (AutoRemove)
+#             is destroyed the instant it stops, which this rollback
+#             cannot survive - such containers are handled via "simple"
+#             instead, automatically, per container.
 #
 # Before touching anything, each targeted container is checked for
 # --precheck-seconds to see whether it is already crashing. This
@@ -1794,6 +1803,14 @@ get_restart_policy() {
   $ENGINE inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null
 }
 
+# Reports whether $1 was started with --rm (AutoRemove). Such a container
+# is destroyed by the engine the moment it stops, which safe mode's
+# rename-based rollback cannot survive - see restart_safe's caller.
+get_auto_remove() {
+  local name="$1"
+  $ENGINE inspect --format '{{.HostConfig.AutoRemove}}' "$name" 2>/dev/null
+}
+
 # Sets $1's restart policy to $2. On failure, returns 1 and leaves the
 # engine's error text in RESTART_POLICY_ERROR (bash 3.2 has no other way
 # to hand back more than an exit code - see the map_* functions' header
@@ -1821,7 +1838,7 @@ record_restart_policy_issue() {
 # ---------------------------------------------------------------------------
 
 restart_simple() {
-  local name="$1" run_cmd="$2"
+  local name="$1" run_cmd="$2" auto_remove="${3:-false}"
   local orig_policy
   orig_policy=$(get_restart_policy "$name")
 
@@ -1833,8 +1850,14 @@ restart_simple() {
 
   log "  [simple] Stopping $name..."
   $ENGINE stop "$name" >/dev/null
-  log "  [simple] Removing $name..."
-  $ENGINE rm "$name" >/dev/null
+
+  if [[ "$auto_remove" == "true" ]]; then
+    log "  [simple] AutoRemove is set; $name was already removed by stop."
+  else
+    log "  [simple] Removing $name..."
+    $ENGINE rm "$name" >/dev/null
+  fi
+
   log "  [simple] Starting new container..."
   eval "$run_cmd"
 
@@ -1862,16 +1885,26 @@ restart_safe() {
 
   rollback() {
     local reason="$1"
+    local rollback_ok=true
     err "  [safe] $reason Rolling back."
     $ENGINE stop "$name" >/dev/null 2>&1 || true
     $ENGINE rm -f "$name" >/dev/null 2>&1 || true
-    $ENGINE rename "$old_name" "$name"
-    $ENGINE start "$name" >/dev/null
+    if ! $ENGINE rename "$old_name" "$name"; then
+      rollback_ok=false
+    elif ! $ENGINE start "$name" >/dev/null; then
+      rollback_ok=false
+    fi
     if [[ "$orig_policy" == "always" ]]; then
       set_restart_policy "$name" "always" \
         || record_restart_policy_issue "$name" "could not restore policy to 'always' after rollback start: $RESTART_POLICY_ERROR"
     fi
-    log "  [safe] Rolled back, $name restored and started."
+    if $rollback_ok; then
+      log "  [safe] Rolled back, $name restored and started."
+    else
+      err "  [safe] ROLLBACK FAILED - could not restore $name from $old_name." \
+          "Manual intervention required; check for containers named" \
+          "'$old_name' and '$name'."
+    fi
   }
 
   fail_no_rollback() {
@@ -2105,8 +2138,17 @@ for name in "${CONTAINERS[@]}"; do
     continue
   fi
 
+  mode="$MODE"
+  auto_remove="$(get_auto_remove "$name")"
+  if [[ "$mode" == "safe" && "$auto_remove" == "true" ]]; then
+    log "  Container has AutoRemove (--rm) enabled; safe mode's rollback requires" \
+        "the old container to survive stopping, which --rm prevents. Using" \
+        "simple mode for $name instead."
+    mode="simple"
+  fi
+
   if $DRY_RUN; then
-    log "  [dry-run] Would restart $name in $MODE mode (pre-status: $pre_status) with:"
+    log "  [dry-run] Would restart $name in $mode mode (pre-status: $pre_status) with:"
     log "    $run_cmd"
     map_set RESULT "$name" dry_run
     ATTEMPTED_ORDER+=("$name")
@@ -2117,8 +2159,8 @@ for name in "${CONTAINERS[@]}"; do
   allow_rollback="true"
   [[ "$pre_status" == "crashing" ]] && allow_rollback="false"
 
-  if [[ "$MODE" == "simple" ]]; then
-    restart_simple "$name" "$run_cmd"
+  if [[ "$mode" == "simple" ]]; then
+    restart_simple "$name" "$run_cmd" "$auto_remove"
   else
     rc=0
     restart_safe "$name" "$run_cmd" "$allow_rollback" || rc=$?
@@ -2132,7 +2174,7 @@ for name in "${CONTAINERS[@]}"; do
 
   if [[ "$pre_status" == "healthy" ]]; then
     if [[ "$final_status" == "healthy" ]]; then
-      if [[ "$MODE" == "safe" && "${rc:-0}" -eq 2 ]]; then
+      if [[ "$mode" == "safe" && "${rc:-0}" -eq 2 ]]; then
         map_set RESULT "$name" rolled_back_working
       elif [[ "$(map_get_default CONTAINER_CHANGED "$name" false)" == "true" ]]; then
         map_set RESULT "$name" upgraded

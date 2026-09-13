@@ -39,6 +39,11 @@ If no container names are given, all running containers are targeted.
   - If the container was already crashing before the upgrade, it is **not**
     rolled back even if it is still failing on the new image (see
     `--skip-crashing` to opt out of attempting these at all).
+  - A container started with `--rm` (AutoRemove) is destroyed by the engine
+    the instant it stops, which the rename-based rollback above cannot
+    survive. Such containers are automatically handled in **simple** mode
+    instead, even when `--mode safe` is requested — this applies per
+    container, not to the whole run.
 
 Before touching anything, each targeted container is checked for
 `--precheck-seconds` to see whether it is already crashing. This
