@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.6-dev6
+# Version: 1.1.6-dev7
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) instead of a stable entry - see
 # script-maintenance-convention.md section 3:
-#   1.1.6 (in progress - currently 1.1.6-dev6) - implements the repo-wide
+#   1.1.6 (in progress - currently 1.1.6-dev7) - implements the repo-wide
 #           maintenance conventions from script-maintenance-convention.md:
 #           (1) --help is now layered - bare --help/self-upgrade options
 #           only on --help upgrade/both on --help full; (2) full history
@@ -64,8 +64,17 @@
 #           `systemctl --user restart` and the result validated (running
 #           again, on the new image, within --external-restart-wait
 #           seconds); only on failure does it fall through to the normal
-#           simple/safe restart. New `--skip-quadlet-restart` opts out.
-#           See CHANGELOG.md for full detail on all nine.
+#           simple/safe restart. New `--skip-quadlet-restart` opts out;
+#           (10) fixed self-upgrade "overwrite"/"memory" apply modes
+#           misreporting themselves as version "unknown" in their own
+#           startup banner during the trial run - the /dev/null placeholder
+#           previously used as the candidate's $0 (1.1.4's fix for a
+#           different bug, a hang) is real but empty, so its
+#           version-detection grep found no `# Version:` line to read. The
+#           candidate is now run from a real scratch file containing its
+#           actual content instead, so version detection finds both a real
+#           filename (no hang) and real content (correct version).
+#           See CHANGELOG.md for full detail on all ten.
 #   1.1.5 - --help visually separates this script's own options from the
 #           self-upgrade options under two labeled groups.
 #   1.1.4 - fixed a self-upgrade hang in "overwrite"/"memory" apply modes:
@@ -1235,19 +1244,30 @@ upgrade_main() {
       exit "$code"
       ;;
     overwrite)
-      local code
+      local code scratch=""
       if [[ -n "$cache_source" ]]; then
         # A real, already-executable file on disk (the link-mode cache
-        # file) - run it directly, sidestepping the /dev/null-as-$0
-        # workaround below entirely, since its own $0 is already a real path.
+        # file) - run it directly, since its own $0 is already a real path.
         "$cache_source" "$@"; code=$?
       else
-        # A literal "--" here becomes the candidate's $0, and its own
-        # `grep ... "$0"` (version detection, top of file) then sees a
-        # trailing "--" with no filename after it - grep treats that as
-        # "end of options" and falls back to reading stdin, hanging forever
-        # with no output. /dev/null is a real, always-empty file instead.
-        bash -c "$content" /dev/null "$@"; code=$?
+        # Write the content to a real scratch file and run bash against
+        # that path (rather than `bash -c "$content" <placeholder> "$@"`)
+        # so the candidate's own $0 is a genuine file - both a real
+        # filename (its version-detection `grep ... "$0"` at the top of
+        # the file doesn't hang reading stdin, the way a literal "--" made
+        # it do) and real content (that grep actually finds the `#
+        # Version:` line, instead of reporting itself as "unknown" the way
+        # an empty /dev/null placeholder made it do). See
+        # docs/requirements/generic/script-upgrade-convention.md section 8
+        # implementation note for both bugs. This same scratch file is
+        # reused below for persist-time hash re-verification (section 6)
+        # instead of being written twice.
+        if ! scratch=$(upgrade_write_temp_scratch "$content"); then
+          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+          UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
+          return 0
+        fi
+        bash "$scratch" "$@"; code=$?
       fi
       if [[ "$code" -eq 0 ]]; then
         if [[ -n "$cache_source" ]]; then
@@ -1261,19 +1281,13 @@ upgrade_main() {
             err "Upgrade to v${latest} failed to persist (overwrite): could not rewrite ${SCRIPT_PATH} - will retry next run"
           fi
         else
-          # Persist-time verification (section 6): "overwrite" has no temp
-          # file of its own (the trial runs $content directly via `bash -c`,
-          # never touching disk) and can't write one next to $SCRIPT_PATH
-          # either - that mode's whole precondition is that the directory
-          # isn't writable. upgrade_write_temp_scratch gets real on-disk
-          # bytes to re-hash from some other writable location instead; a
-          # failure to even get that scratch copy just skips the check
-          # (best-effort, same as the rest of this convention), not a
-          # mismatch.
-          local scratch mismatch=0
-          if scratch=$(upgrade_write_temp_scratch "$content"); then
+          # Persist-time verification (section 6), reusing the scratch
+          # file the trial run above already wrote - a failure to have
+          # gotten that scratch copy just skips the check (best-effort,
+          # same as the rest of this convention), not a mismatch.
+          local mismatch=0
+          if [[ -n "$scratch" ]]; then
             upgrade_verify_disk_hash "$scratch" "$tag_hash" || mismatch=1
-            rm -f "$scratch"
           fi
           if [[ "$mismatch" == "1" ]]; then
             err "Upgrade to v${latest} failed to persist (overwrite): on-disk content hash mismatch after trial run - not applied, will retry next run"
@@ -1284,6 +1298,7 @@ upgrade_main() {
           fi
         fi
       fi
+      [[ -n "$scratch" ]] && rm -f "$scratch"
       exit "$code"
       ;;
     link)
@@ -1314,10 +1329,20 @@ upgrade_main() {
       exit "$code"
       ;;
     memory)
-      # See the "overwrite" case above for why /dev/null (not "--") is
-      # passed as $0 here.
-      bash -c "$content" /dev/null "$@"
-      exit $?   # never persisted, regardless of outcome
+      # See the "overwrite" case above for why the candidate is run from a
+      # real scratch file instead of `bash -c "$content" <placeholder>
+      # "$@"`. Unlike "overwrite", there is no persist step to reuse this
+      # file for afterward - it exists purely to give the trial run a real
+      # $0, and is discarded immediately once that run exits.
+      local scratch code
+      if ! scratch=$(upgrade_write_temp_scratch "$content"); then
+        unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+        UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
+        return 0
+      fi
+      bash "$scratch" "$@"; code=$?
+      rm -f "$scratch"
+      exit "$code"   # never persisted, regardless of outcome
       ;;
   esac
 }

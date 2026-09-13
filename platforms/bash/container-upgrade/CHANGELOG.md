@@ -12,6 +12,27 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.6-dev7
+Fixes a self-upgrade bug in the `overwrite`/`memory` apply modes: the trial
+run of a candidate misreported its own version as `unknown` in the startup
+banner (e.g. `container-upgrade.sh vunknown (self-upgrading from v1.1.6-dev5
+via overwrite)`), instead of the actual new version. Root cause: both modes
+ran the candidate as `bash -c "$content" /dev/null "$@"`, using `/dev/null`
+as a placeholder `$0` to avoid a different bug (1.1.4's grep-hangs-reading-
+stdin fix). `/dev/null` is a real file, so it sidesteps that hang, but it is
+also always empty, so the candidate's own version-detection `grep ... "$0"`
+found no `# Version:` line to read. The candidate is now written to a real
+scratch temp file first and run as `bash "$scratch_file" "$@"`, giving it a
+genuine `$0` with genuine content - both a real filename (no hang) and real
+content (correct version) at once. `overwrite` reuses this same scratch
+file for its existing persist-time hash re-verification instead of writing
+it twice; `memory` writes and discards its own transient copy purely for
+this purpose, consistent with never persisting anything. Purely a
+self-upgrade logging/reporting fix - it does not change what gets applied
+or how upgrade eligibility/hashing is decided. See
+[docs/requirements/generic/script-upgrade-convention.md](../../../docs/requirements/generic/script-upgrade-convention.md)
+section 8's implementation note for the full writeup of both bugs.
+
 ## 1.1.6-dev6
 Implements
 [docs/requirements/implemented/quadlet-managed-restart.md](docs/requirements/implemented/quadlet-managed-restart.md).

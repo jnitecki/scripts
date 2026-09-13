@@ -289,11 +289,12 @@ declared hash from section 5, at the point closest to that mode's own
 commit:
 - `replacement`/`overwrite`: after a successful trial run, immediately
   before the temp-file `mv` / in-place rewrite that makes it live.
-  `overwrite` has no temp file of its own to reuse for this (its trial
-  runs the content directly, never touching disk) and can't write one
-  next to the script either — its whole precondition is that the
-  directory isn't writable — so a scratch copy is written to some other
-  writable location purely to get real on-disk bytes to re-hash from.
+  `overwrite`'s scratch copy for this is the same file its trial run
+  already wrote to get a real `$0` (section 8's implementation note) —
+  written once, before the trial run, and reused here rather than
+  rewritten. It can't be written next to the script itself — `overwrite`'s
+  whole precondition is that the directory isn't writable — so it goes to
+  some other writable location instead.
 - `link`: immediately after writing the cache file, before it is ever
   trusted enough to run — this mode persists *before* its trial run
   (section 7), so there's no later "before the `mv`" moment the way there
@@ -384,27 +385,50 @@ it's proven to work:
 - For `--upgrade-only`, there is no "actual work" to trial-run (see section
   12) — validated candidates are persisted directly instead.
 
-**Implementation note — a second real bug this convention's own bash
-reference implementation shipped with.** `overwrite` and `memory` both run
-the candidate as `bash -c "$content" -- "$@"`. In `bash -c
+**Implementation note — two real bugs this convention's own bash reference
+implementation shipped with, both from running `overwrite`/`memory`
+candidates via `bash -c` with a synthetic `$0` instead of a real file.**
+The original approach ran the candidate as `bash -c "$content" -- "$@"`
+(later `bash -c "$content" /dev/null "$@"` — see bug 2 below). In `bash -c
 command_string [name [args]]`, the first argument after `command_string`
-becomes the invoked script's own `$0` — so this makes the literal string
-`--` the candidate's `$0`, not merely an option-parsing separator as it
-might look. The candidate script (being a fresh copy of the same
-convention's own header logic) reads its own version off `# Version:` via
-`grep ... "$0"` near the very top of the file, before anything is ever
-printed — which then runs as `grep ... --`. GNU grep treats a trailing
-`--` with no filename after it as "end of options", not as a (nonexistent)
-filename, and falls back to reading stdin instead — which never reaches
-EOF here, hanging the entire trial run indefinitely with zero output, before
-the candidate's own startup banner (section 10) or any other line ever
-prints. This shipped undetected because earlier testing invoked candidates
-directly (a real path, not `--`) rather than through this exact `bash -c`
-form. The fix: pass `/dev/null` — a real, always-empty file — as `$0`
-instead of `--`. Any implementation using `bash -c` to run a candidate
-in-memory (`overwrite`, `memory`) needs a real (or at least
-grep/sed-option-safe) placeholder there, not a bare `--` or any other
-string a downstream option parser could mistake for a flag.
+becomes the invoked script's own `$0`.
+
+1. *The hang.* With `--` as `$0`, the candidate script (being a fresh copy
+   of the same convention's own header logic) reads its own version off
+   `# Version:` via `grep ... "$0"` near the very top of the file, before
+   anything is ever printed — which then ran as `grep ... --`. GNU grep
+   treats a trailing `--` with no filename after it as "end of options",
+   not as a (nonexistent) filename, and falls back to reading stdin
+   instead — which never reaches EOF here, hanging the entire trial run
+   indefinitely with zero output, before the candidate's own startup
+   banner (section 10) or any other line ever prints. This shipped
+   undetected because earlier testing invoked candidates directly (a real
+   path, not `--`) rather than through this exact `bash -c` form.
+2. *The wrong version.* Swapping `--` for `/dev/null` (a real,
+   always-empty file) fixed the hang — grep now has an actual filename —
+   but broke the *content* of that same version-detection line instead:
+   `/dev/null` is real but empty, so `grep ... "$0"` finds no `# Version:`
+   line at all and the candidate falls back to reporting itself as version
+   `unknown`. This surfaces directly in the startup banner the trial run
+   prints for itself (section 10) — e.g. `container-upgrade.sh vunknown
+   (self-upgrading from v1.1.6 via overwrite)` — misreporting the very
+   version being applied, even though the upgrade itself completes
+   correctly (nothing here affects persistence or the hash checks in
+   section 6).
+
+**The fix:** don't run the candidate via `bash -c` with a synthetic `$0`
+at all — write `$content` to a real scratch temp file first and invoke it
+as `bash "$scratch_file" "$@"`. Running bash against an actual file path
+sets `$0` to that path automatically, so the candidate's version-detection
+`grep` finds both a real file (no hang) and its real content (correct
+version) in one step. `overwrite` already needs a scratch copy of the
+content for section 6's persist-time hash re-verification — write it once,
+before the trial run, and reuse the same file for that check afterward
+instead of writing it twice. `memory` has no persist step to reuse a
+scratch file for, but must still write one transiently, purely so its
+trial run gets a real `$0` — discarded immediately after the trial run
+exits, never persisted, consistent with `memory`'s existing "nothing
+survives this run" contract.
 
 **Persist-outcome reporting.** The banner note printed before a trial run
 (section 10) necessarily describes only what's being *attempted* — it

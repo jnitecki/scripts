@@ -743,19 +743,29 @@ upgrade_banner_note() {
 #       exit "$code"   # candidate's real work already ran either way - no retry, see section 9
 #       ;;
 #     overwrite)
+#       local scratch=""
 #       if [ -n "$cache_source" ]; then
 #         # A real, already-executable file on disk - run it directly, no
-#         # need for the /dev/null-as-$0 workaround below at all.
+#         # need for the scratch-file workaround below at all.
 #         "$cache_source" "$@"; local code=$?
 #       else
-#         # /dev/null (not "--") as $0: a literal "--" here would become the
-#         # candidate's $0, and its own version-detection `grep ... "$0"`
-#         # would then see a trailing "--" with no filename after it - GNU
-#         # grep treats that as "end of options" and falls back to reading
-#         # stdin, hanging forever with no output (see the convention doc's
-#         # section 6/8 implementation note). /dev/null is a real, always-
-#         # empty file, so the grep just finds no match instead.
-#         bash -c "$content" /dev/null "$@"; local code=$?
+#         # Write the content to a real scratch file and run bash against
+#         # that path, rather than `bash -c "$content" <placeholder> "$@"`.
+#         # A literal "--" as $0 there would make the candidate's own
+#         # version-detection `grep ... "$0"` see a trailing "--" with no
+#         # filename after it - GNU grep treats that as "end of options"
+#         # and falls back to reading stdin, hanging forever with no
+#         # output. Swapping in /dev/null (a real, always-empty file) fixes
+#         # that hang but breaks the same grep a different way: empty means
+#         # no `# Version:` line to find, so the candidate misreports
+#         # itself as version "unknown" in its own startup banner instead
+#         # (see the convention doc's section 8 implementation note for
+#         # both bugs). A real scratch file with real content sidesteps
+#         # both at once, and doubles as the persist-time re-verification
+#         # copy below instead of being written twice.
+#         scratch=$(upgrade_write_temp_scratch "$content")
+#         [ -n "$scratch" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
+#         bash "$scratch" "$@"; local code=$?
 #       fi
 #       if [ "$code" -eq 0 ]; then
 #         if [ -n "$cache_source" ]; then
@@ -768,17 +778,13 @@ upgrade_banner_note() {
 #             printf '%s: upgrade to v%s failed to persist (overwrite): could not rewrite %s - will retry next run\n' "$SCRIPT_NAME" "$latest" "$SCRIPT_PATH" >&2
 #           fi
 #         else
-#           # Persist-time re-verification (section 6): "overwrite" has no
-#           # temp file of its own (the trial runs $content directly, never
-#           # touching disk) and can't write one next to $SCRIPT_PATH either -
-#           # that's the mode's whole precondition - so upgrade_write_temp_
-#           # scratch gets real on-disk bytes to re-hash from elsewhere. A
-#           # failure to even get that scratch copy just skips the check
-#           # (best-effort), not a mismatch.
-#           local scratch mismatch=0
-#           if scratch=$(upgrade_write_temp_scratch "$content"); then
+#           # Persist-time re-verification (section 6), reusing the
+#           # scratch file the trial run above already wrote instead of
+#           # writing a second copy. A failure to have gotten that scratch
+#           # copy just skips the check (best-effort), not a mismatch.
+#           local mismatch=0
+#           if [ -n "$scratch" ]; then
 #             upgrade_verify_disk_hash "$scratch" "$tag_hash" || mismatch=1
-#             rm -f "$scratch"
 #           fi
 #           if [ "$mismatch" = "1" ]; then
 #             printf '%s: upgrade to v%s failed to persist (overwrite): on-disk content hash mismatch after trial run - not applied, will retry next run\n' "$SCRIPT_NAME" "$latest" >&2
@@ -789,6 +795,7 @@ upgrade_banner_note() {
 #           fi
 #         fi
 #       fi
+#       [ -n "$scratch" ] && rm -f "$scratch"
 #       exit "$code"
 #       ;;
 #     link)
@@ -816,10 +823,16 @@ upgrade_banner_note() {
 #       exit "$code"
 #       ;;
 #     memory)
-#       # See the "overwrite" case above for why /dev/null (not "--") is
-#       # passed as $0 here.
-#       bash -c "$content" /dev/null "$@"
-#       exit $?   # never persisted, regardless of outcome
+#       # See the "overwrite" case above for why the candidate is run from
+#       # a real scratch file instead of `bash -c "$content" <placeholder>
+#       # "$@"`. Unlike "overwrite", there is no persist step to reuse this
+#       # file for afterward - it exists purely to give the trial run a
+#       # real $0, discarded immediately once that run exits.
+#       local scratch; scratch=$(upgrade_write_temp_scratch "$content")
+#       [ -n "$scratch" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
+#       bash "$scratch" "$@"; local code=$?
+#       rm -f "$scratch"
+#       exit "$code"   # never persisted, regardless of outcome
 #       ;;
 #   esac
 # }
