@@ -12,6 +12,24 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.7-dev4
+Fixes misleading log output when a container ends up restarted via a
+systemd unit (Quadlet or a manual `systemd.unit` label): the
+AutoRemove(`--rm`)-driven safe→simple mode downgrade was decided and
+logged ("Container has AutoRemove (--rm) enabled; ... Using simple mode
+for `<name>` instead.") unconditionally, before the script even attempted
+the systemd-unit restart — which bypasses this script's own stop/remove/run
+entirely and doesn't use `mode` at all when it succeeds. A container
+restarted cleanly via `systemctl restart` therefore logged a mode decision
+that was never actually exercised, reading as if the upgrade had used
+simple mode when in fact it never touched the container directly. The
+downgrade decision (`mode="simple"`) is still computed up front, since
+dry-run's fallback-mode display and the eventual real fallback both need
+it, but the log line announcing it is now deferred: logged immediately
+only when there's no systemd unit to try first, and otherwise only if the
+systemd-unit restart is attempted and fails, right before the script
+actually falls back to its own `restart_simple`/`restart_safe` path.
+
 ## 1.1.7-dev3
 Fixes an image-pull failure log that could itself fail with
 `Permission denied`: `docker pull`/`podman pull` output was redirected to a

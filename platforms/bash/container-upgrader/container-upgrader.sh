@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.7-dev3
+# Version: 1.1.7-dev4
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.7 (in progress - currently 1.1.7-dev3) - adds manual systemd-unit-
+#   1.1.7 (in progress - currently 1.1.7-dev4) - adds manual systemd-unit-
 #           managed restart support: a container can now opt into the same
 #           systemctl-based restart Podman Quadlet gets automatically, via a
 #           manual `systemd.unit` label (checked before PODMAN_SYSTEMD_UNIT).
@@ -49,6 +49,17 @@
 #           world-writable /tmp besides. Each pull now logs to its own
 #           mktemp-generated file, reported by its actual path in the
 #           failure message.
+#           Fixed: the AutoRemove(--rm)-driven safe->simple mode downgrade
+#           was announced and applied unconditionally, before it was known
+#           whether a systemd-unit restart (checked first, and bypassing
+#           this script's own stop/remove/run entirely) would even be
+#           attempted - so a container that ended up restarted cleanly via
+#           systemd still logged a "Using simple mode... instead" message
+#           that was never actually relevant. The downgrade is now
+#           deferred: it's logged immediately only when no systemd unit is
+#           in play, and otherwise only if the systemd-unit restart is
+#           attempted and fails, at the point the script actually falls
+#           back to its own simple/safe restart path.
 #   1.1.6 - implements the repo-wide maintenance conventions from
 #           script-maintenance-convention.md (layered --help, CHANGELOG.md,
 #           the numbered-suffix versioning scheme) plus several real bugs
@@ -2599,13 +2610,23 @@ for name in "${CONTAINERS[@]}"; do
     continue
   fi
 
+  # mode is only actually exercised as a fallback when no systemd unit is
+  # available/attempted, or the systemd-unit restart is attempted but fails
+  # (see systemd_unit_succeeded below) - a systemd-unit restart bypasses
+  # this script's own stop/remove/run entirely (restart_via_systemd_unit),
+  # so an AutoRemove-driven safe->simple downgrade isn't relevant to it and
+  # would be misleading to announce before knowing whether it'll be used.
   mode="$MODE"
   auto_remove="$(get_auto_remove "$name")"
+  rm_downgrade=false
   if [[ "$mode" == "safe" && "$auto_remove" == "true" ]]; then
+    mode="simple"
+    rm_downgrade=true
+  fi
+  if $rm_downgrade && [[ -z "$systemd_unit" ]]; then
     log "  Container has AutoRemove (--rm) enabled; safe mode's rollback requires" \
         "the old container to survive stopping, which --rm prevents. Using" \
         "simple mode for $name instead."
-    mode="simple"
   fi
 
   if $DRY_RUN; then
@@ -2646,6 +2667,11 @@ for name in "${CONTAINERS[@]}"; do
           "did not succeed either - skipping to avoid data loss."
       map_set RESULT "$name" reconstruct_failed
       continue
+    fi
+    if $rm_downgrade && [[ -n "$systemd_unit" ]]; then
+      log "  Container has AutoRemove (--rm) enabled; safe mode's rollback requires" \
+          "the old container to survive stopping, which --rm prevents. Falling back" \
+          "to simple mode for $name."
     fi
     if [[ "$mode" == "simple" ]]; then
       restart_simple "$name" "$run_cmd" "$auto_remove" "$old_id" "$new_id"
