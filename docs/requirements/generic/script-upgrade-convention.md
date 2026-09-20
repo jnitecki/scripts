@@ -82,11 +82,11 @@ A script that supports self-upgrade adds one line to its header, after
 Example (this repo's actual remote,
 `https://github.com/jnitecki/scripts.git`):
 ```
-# Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
+# Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
 ```
 
 - `<lang>/<script-name>` matches the script's own path under `platforms/`
-  (e.g. `platforms/bash/container-upgrade/`) and doubles as the **tag
+  (e.g. `platforms/bash/container-upgrader/`) and doubles as the **tag
   prefix** used for version discovery (see below). It is stated explicitly
   rather than inferred from the running script's file path, since a script
   is expected to be deployable standalone, copied out of a full repo
@@ -140,10 +140,10 @@ Tags identifying releases of a given script follow the pattern:
 ```
 <lang>/<script-name>/v<X.Y.Z>
 ```
-e.g. `bash/container-upgrade/v1.0.7`, optionally with a pre-release suffix
+e.g. `bash/container-upgrader/v1.0.7`, optionally with a pre-release suffix
 using the same syntax as the header's `Version:` field
 ([[script-catalog-generator]]'s `-dev`/`-alpha`/`-beta`/`-rc`), e.g.
-`bash/container-upgrade/v1.0.8-beta`. Created automatically by
+`bash/container-upgrader/v1.0.8-beta`. Created automatically by
 `tools/git-hooks/post-commit.sh` — see
 `docs/requirements/implemented/release-tag-hook.md`.
 
@@ -358,7 +358,7 @@ newly escalated past `link`.
 Unlike a scheme that persists an upgrade purely on the strength of its
 syntax/hash validation, this convention treats a candidate's **first real
 invocation** as part of validating it — consistent with this repository's
-own container-upgrade philosophy of never committing to a change until
+own container-upgrader philosophy of never committing to a change until
 it's proven to work:
 
 - For an **ordinary** (non-`--upgrade-only`) invocation, once a candidate
@@ -444,8 +444,8 @@ performs that persist step prints one more line — after all of the trial
 run's own output, to stderr, never affecting the invocation's exit code
 (still the trial run's own, per section 9) — stating whether it succeeded:
 ```
-container-upgrade: upgrade to v1.1.0 applied (replacement)
-container-upgrade: upgrade to v1.1.0 failed to persist (replacement): could not rename temp file — will retry next run
+container-upgrader: upgrade to v1.1.0 applied (replacement)
+container-upgrader: upgrade to v1.1.0 failed to persist (replacement): could not rename temp file — will retry next run
 ```
 This line does not apply to every mode: `link` mode persists *before* its
 trial run (section 7), so a persist failure there is already reported as a
@@ -512,15 +512,15 @@ invocation:
 
 Examples:
 ```
-container-upgrade v1.0.7
-container-upgrade v1.0.7 (upgrade not checked: cooldown active)
-container-upgrade v1.0.7 (no upgrade available)
-container-upgrade v1.0.7 (upgrade check failed: could not reach github.com)
-container-upgrade v1.0.7 (fetched v1.1.0 failed to parse — running v1.0.7)
-container-upgrade v1.0.7 (fetched v1.1.0, content hash mismatch — running v1.0.7)
-container-upgrade v1.1.0 (self-upgrading from v1.0.7 via replacement)
-container-upgrade v1.1.0 (self-upgrading from v1.0.7 via link, running from cache)
-container-upgrade v1.1.0 (self-upgrading from v1.0.7 via memory, this run only)
+container-upgrader v1.0.7
+container-upgrader v1.0.7 (upgrade not checked: cooldown active)
+container-upgrader v1.0.7 (no upgrade available)
+container-upgrader v1.0.7 (upgrade check failed: could not reach github.com)
+container-upgrader v1.0.7 (fetched v1.1.0 failed to parse — running v1.0.7)
+container-upgrader v1.0.7 (fetched v1.1.0, content hash mismatch — running v1.0.7)
+container-upgrader v1.1.0 (self-upgrading from v1.0.7 via replacement)
+container-upgrader v1.1.0 (self-upgrading from v1.0.7 via link, running from cache)
+container-upgrader v1.1.0 (self-upgrading from v1.0.7 via memory, this run only)
 ```
 The bare first line (no parenthetical at all) is now reserved for exactly
 one case: self-upgrade disabled for this run. Every other reachable outcome
@@ -676,7 +676,7 @@ the "fails parsing → fall back" requirement, not for security.
   it** (the original design of this convention, before this rework):
   rejected in favor of the trial-run-then-persist model (section 8) — a
   candidate that parses fine and matches its declared hash can still fail
-  at runtime (a bad release), and this repository's own container-upgrade
+  at runtime (a bad release), and this repository's own container-upgrader
   philosophy is to never commit to a change unproven by an actual
   successful run.
 - **`--upgrade-type` as a floor instead of a ceiling** (escalating to a

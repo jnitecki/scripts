@@ -12,8 +12,8 @@ the "reuse an existing category" convention it defines.
 ### Identifying a script across platforms
 A script is identified by the leaf folder name under `platforms/<lang>/`.
 When the same folder name exists under more than one `platforms/<lang>/`
-tree (e.g. `platforms/bash/container-upgrade/` and
-`platforms/powershell/container-upgrade/`), those are treated as platform
+tree (e.g. `platforms/bash/container-upgrader/` and
+`platforms/powershell/container-upgrader/`), those are treated as platform
 variants of the same logical script and merged into one catalog entry.
 Each variant keeps its own independent `Version` — versions may differ
 across platforms for the same script.
@@ -24,7 +24,7 @@ A single stable, low-churn file: a flat table, one row per logical script
 
 | Name | Description | Categories | Platforms |
 |---|---|---|---|
-| container-upgrade | Docker image upgrade automation with rollback support | containers | bash |
+| container-upgrader | Docker image upgrade automation with rollback support | containers | bash |
 
 - **Categories** lists every category the script belongs to, comma-separated.
 - **Platforms** lists every platform name the script has an implementation
@@ -44,10 +44,10 @@ others) and one sub-line per platform, each carrying that platform's own
 version and a link to its implementation file:
 
 ```
-### container-upgrade
+### container-upgrader
 Docker image upgrade automation with rollback support
 Categories: containers
-- **bash** (v1.0.7) — [container-upgrade.sh](platforms/bash/container-upgrade/container-upgrade.sh)
+- **bash** (v1.0.7) — [container-upgrader.sh](platforms/bash/container-upgrader/container-upgrader.sh)
 ```
 
 **UNCATEGORIZED.md** is the catch-all for scripts with no `Category:`

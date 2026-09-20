@@ -25,7 +25,7 @@
 # --- Identity, read from the adopting script's own header (section 1) ------
 # SCRIPT_PATH="$0"
 # SCRIPT_LANG="bash"
-# SCRIPT_NAME="container-upgrade"                # matches platforms/<lang>/<name>/
+# SCRIPT_NAME="container-upgrader"                # matches platforms/<lang>/<name>/
 # SCRIPT_VERSION="1.0.9"                          # parsed from own "# Version:" line
 # UPGRADE_HOST="github.com"
 # UPGRADE_OWNER="jnitecki"

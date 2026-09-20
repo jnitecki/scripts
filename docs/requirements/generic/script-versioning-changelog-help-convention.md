@@ -56,7 +56,7 @@ in the script, nothing external) no longer applies.
 - Every normal (non-`--help`) invocation must print one line identifying the
   script and its version before doing any real work, e.g.:
   ```
-  container-upgrade v1.0.7
+  container-upgrader v1.0.7
   ```
 - Sourced from the same header `Version:` line as `--help` and the changelog
   — never a separately maintained string (same rule as section 1).
@@ -79,7 +79,7 @@ in the script, nothing external) no longer applies.
   outcome of the script's actual functional work.
 
 ## Rationale
-Generalizes the conventions established in `container-upgrade.sh` so every
+Generalizes the conventions established in `container-upgrader.sh` so every
 future script in this repository is self-documenting, diagnosable without
 external docs, and consistent regardless of author or language: version
 history is always where you'd look for it (the header's recent-entries

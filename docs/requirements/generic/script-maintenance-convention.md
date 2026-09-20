@@ -20,7 +20,7 @@ points back here.
   — not only the one script named in whatever issue report or improvement
   request triggered the fix.
 - This does not apply to a script's own domain-specific bug fixes (e.g.
-  container-upgrade's restart-policy handling) — only to the shared
+  container-upgrader's restart-policy handling) — only to the shared
   self-upgrade subsystem (anything inside the "Self-upgrade ... begins/ends"
   block a script copied from the blueprint).
 - Rationale: the blueprint is the single source of truth for the self-upgrade
@@ -157,7 +157,7 @@ the gate.
 
 **Implementation note — a real bug this section's own rollout hit
 immediately.** A script's own `Version:` header-parsing regex (e.g.
-`container-upgrade.sh`'s `grep -m1 -E '^# Version: [0-9]+\.[0-9]+\.[0-9]+
+`container-upgrader.sh`'s `grep -m1 -E '^# Version: [0-9]+\.[0-9]+\.[0-9]+
 (-[a-z]+)?$'`) also has to accept the trailing revision number, not just
 [[script-upgrade-convention]]'s comparison functions — the pattern above only
 allowed letters after the dash. Adopting a numbered suffix without updating
@@ -168,17 +168,17 @@ then optional trailing digits) in place of `(-[a-z]+)?`.
 
 ## Rationale
 These are cross-cutting authoring/process rules discovered while maintaining
-`container-upgrade.sh` and its shared self-upgrade mechanism — kept separate
+`container-upgrader.sh` and its shared self-upgrade mechanism — kept separate
 from the topic-specific convention docs they extend so that "how we make
 changes across every script" stays in one place, rather than scattered
 implicitly across individual fix commits.
 
 ## Implementation status
-Sections 2-4 are implemented in `container-upgrade.sh` (v1.1.6-dev1) and,
+Sections 2-4 are implemented in `container-upgrader.sh` (v1.1.6-dev1) and,
 per section 1's own rule, in the bash blueprint first:
 - Section 4 (version comparison): `upgrade_version_level`/
   `upgrade_version_gt` in both `tools/blueprints/bash.sh` and
-  `container-upgrade.sh` strip the trailing revision number before computing
+  `container-upgrader.sh` strip the trailing revision number before computing
   level and use it as the final ordering tiebreaker; a new
   `upgrade_version_number` extracts it. `upgrade_parse_versions` in both no
   longer discards a discovered tag's suffix (a pre-existing bug — see
@@ -186,10 +186,10 @@ per section 1's own rule, in the bash blueprint first:
   `resolve_version` guard got the matching same-level/same-`X.Y.Z` tiebreak
   (its `version_level` already tolerated numbered suffixes via glob
   matching, so only the tiebreak itself was missing).
-- Section 3 (changelog): `platforms/bash/container-upgrade/CHANGELOG.md`
+- Section 3 (changelog): `platforms/bash/container-upgrader/CHANGELOG.md`
   holds the complete history, newest first; the script header keeps only
   its 3 most recent entries.
-- Section 2 (`--help` layering): `container-upgrade.sh`'s `usage()` now
+- Section 2 (`--help` layering): `container-upgrader.sh`'s `usage()` now
   slices its header by content-based markers (`# HELP:<region>:BEGIN`/
   `:END`) instead of hardcoded line numbers, and supports `--help` (core
   options only), `--help upgrade` (self-upgrade options only), and
@@ -198,7 +198,7 @@ per section 1's own rule, in the bash blueprint first:
 - Section 1 (blueprint-first workflow): followed for this very rollout —
   the version-comparison fix (section 4) was written into
   `tools/blueprints/bash.sh` first, then replicated into
-  `container-upgrade.sh`. Still has no tooling enforcement; it remains a
+  `container-upgrader.sh`. Still has no tooling enforcement; it remains a
   process rule for whoever makes the next self-upgrade change, and for any
   other adopting script once one exists.
 

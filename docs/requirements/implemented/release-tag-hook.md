@@ -8,7 +8,7 @@ actually get created ... is undecided"). Depends on
 [[script-header-convention]] for locating each script's `Version:` line, and
 on [[cross-platform-shell-compatibility]] for the hook's own bash
 portability (it must run under macOS's stock bash 3.2, same constraint as
-`container-upgrade.sh`).
+`container-upgrader.sh`).
 
 Applies only to scripts under `platforms/<lang>/<script-name>/`; does not
 touch `tools/` scripts, catalog files, or any other repo content.

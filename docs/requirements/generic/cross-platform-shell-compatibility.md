@@ -37,7 +37,7 @@ platforms differ in ways that silently break naive bash scripts:
   limited to `date`, `sed -i`, `grep`, `stat`, `readlink -f`, and `mktemp`.
 - A script using any of these must handle both flavors: either restrict to
   flags/behavior common to both, or explicitly try the GNU form and fall
-  back to the BSD form (or vice versa). See `container-upgrade.sh`'s
+  back to the BSD form (or vice versa). See `container-upgrader.sh`'s
   `parse_to_epoch()` for the reference pattern: it tries GNU `date -d`
   first, then falls back to BSD/macOS `date -j -f` syntax.
 
