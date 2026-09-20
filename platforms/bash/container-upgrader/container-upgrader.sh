@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.7-dev1
+# Version: 1.1.7-dev2
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.7 (in progress - currently 1.1.7-dev1) - adds manual systemd-unit-
+#   1.1.7 (in progress - currently 1.1.7-dev2) - adds manual systemd-unit-
 #           managed restart support: a container can now opt into the same
 #           systemctl-based restart Podman Quadlet gets automatically, via a
 #           manual `systemd.unit` label (checked before PODMAN_SYSTEMD_UNIT).
@@ -30,6 +30,18 @@
 #           via systemd. New `--skip-manual-unit-restart`/
 #           `--skip-systemd-restart` options; `--skip-quadlet-restart` is
 #           unchanged but now scoped to only the PODMAN_SYSTEMD_UNIT trigger.
+#           Fixed: get_run_command diffed workdir/env/labels/entrypoint/cmd
+#           against the NEW (already-pulled) image instead of the ORIGINAL
+#           one the container was created from, so a value only ever
+#           inherited from the old image's own default (never explicitly
+#           set) looked like an override and got pinned forward - e.g. a
+#           container that never set --entrypoint could get recreated with
+#           `--entrypoint <old image's entrypoint path>`, which fails to
+#           start if that path doesn't exist in the new image. Now diffed
+#           against the original image; the safe-mode config check
+#           (normalized_config) was updated the same way so a legitimately
+#           inherited new-image default no longer looks like drift and
+#           triggers a spurious rollback.
 #   1.1.6 - implements the repo-wide maintenance conventions from
 #           script-maintenance-convention.md (layered --help, CHANGELOG.md,
 #           the numbered-suffix versioning scheme) plus several real bugs
@@ -106,7 +118,14 @@
 # bind/volume/tmpfs mounts, network mode (if non-default), restart
 # policy, privileged, cap-add/cap-drop, devices, extra hosts, memory
 # limit, cpu limit, security-opt, dns, tty/stdin flags, entrypoint
-# override (first element only - see note below), and cmd.
+# override (first element only - see note below), and cmd (if
+# overridden). Workdir/env/labels/entrypoint/cmd are diffed against the
+# ORIGINAL image the container was created from, not the new image being
+# upgraded to - so a value only ever inherited from the old image's
+# default (never explicitly set) is left out, and the new container picks
+# up the new image's own default for it instead of getting pinned to a
+# stale value that may not even be valid on the new image (e.g. an
+# entrypoint script path that moved between versions).
 #
 # Known limitations of the reconstruction (the safe-mode config check
 # exists specifically to catch these before they cause silent drift):
@@ -1523,17 +1542,54 @@ fi
 # Run-command reconstruction
 # ---------------------------------------------------------------------------
 
+# Computes, as JSON, the subset of container inspect JSON $1's Config that
+# was actually explicit at creation time (a flag passed to `run`) rather
+# than inherited from image Config JSON $2's own baked-in defaults. $2 MUST
+# be the image the container was actually created from - not any newer
+# image - otherwise a value that's only equal to the OLD image's default
+# (never explicitly set) looks like an override once diffed against a NEW
+# image whose own default differs, and gets wrongly pinned forward.
+# WorkingDir/Entrypoint/Cmd are replace-only (image default or explicit
+# value, never both), so only the explicit case yields non-null; Env/Labels
+# are image-default-plus-explicit-additions, so the image's own entries are
+# subtracted out. Shared by get_run_command (to build override flags) and
+# normalized_config (so the safe-mode config check compares genuine
+# overrides only, not values that legitimately track a new image's own
+# defaults).
+explicit_config() {
+  local cjson="$1" ijson="$2"
+  jq -n --argjson c "$cjson" --argjson ic "$ijson" '
+    def arr(x): if x == null then [] else x end;
+    {
+      WorkingDir: (if (($c.Config.WorkingDir // "") != "") and ($c.Config.WorkingDir != ($ic.WorkingDir // ""))
+                     then $c.Config.WorkingDir else null end),
+      Entrypoint: (if ($c.Config.Entrypoint != null) and ($c.Config.Entrypoint != ($ic.Entrypoint // null))
+                     then $c.Config.Entrypoint else null end),
+      Cmd: (if ($c.Config.Cmd != null) and ($c.Config.Cmd != ($ic.Cmd // null))
+              then $c.Config.Cmd else null end),
+      Env: ((arr($c.Config.Env) - arr($ic.Env)) | sort),
+      Labels: ( ( (($c.Config.Labels // {}) | to_entries) - (($ic.Labels // {}) | to_entries) )
+                | sort_by(.key) )
+    }
+  '
+}
+
 # Builds an `<engine> run ...` command line reproducing container $1's
-# settings, diffed against image $2's own baked-in defaults (so we only
-# emit overrides, not everything the image already provides).
+# settings. $2 must be the image the container was actually created from
+# (its "before" image on an upgrade, NOT the newly-pulled one it's about to
+# move to) - see explicit_config for why. Settings that merely track that
+# original image's own defaults are left out, so only real overrides are
+# emitted; the new container then picks up the new image's own defaults for
+# anything the caller never explicitly set.
 get_run_command() {
-  local name="$1" image="$2"
-  local cjson ijson args quoted
+  local name="$1" orig_image="$2"
+  local cjson ijson ejson args quoted
 
   cjson=$($ENGINE inspect --format '{{json .}}' "$name" 2>/dev/null) || return 1
-  ijson=$($ENGINE image inspect --format '{{json .Config}}' "$image" 2>/dev/null) || ijson='{}'
+  ijson=$($ENGINE image inspect --format '{{json .Config}}' "$orig_image" 2>/dev/null) || ijson='{}'
+  ejson=$(explicit_config "$cjson" "$ijson")
 
-  args=$(jq -n --argjson c "$cjson" --argjson ic "$ijson" '
+  args=$(jq -n --argjson c "$cjson" --argjson ic "$ijson" --argjson e "$ejson" '
     def arr(x): if x == null then [] else x end;
     ( ($c.Id // "")[0:12] ) as $shortid |
 
@@ -1546,21 +1602,19 @@ get_run_command() {
 
     (if (($c.Config.User // "") != "") then ["--user", $c.Config.User] else [] end) +
 
-    (if (($c.Config.WorkingDir // "") != "") and ($c.Config.WorkingDir != ($ic.WorkingDir // ""))
-       then ["--workdir", $c.Config.WorkingDir] else [] end) +
+    (if ($e.WorkingDir != null) then ["--workdir", $e.WorkingDir] else [] end) +
 
-    ( [ (arr($c.Config.Env) - arr($ic.Env))[] | ("--env", .) ] | flatten ) +
+    ( [ $e.Env[] | ("--env", .) ] | flatten ) +
 
-    ( ( (($c.Config.Labels // {}) | to_entries) - (($ic.Labels // {}) | to_entries) )
-      | map(["--label", (.key + "=" + .value)]) | flatten ) +
+    ( $e.Labels | map(["--label", (.key + "=" + .value)]) | flatten ) +
 
-    ( [ ($c.HostConfig.PortBindings // {}) | to_entries[] as $e |
-        $e.value[]? |
+    ( [ ($c.HostConfig.PortBindings // {}) | to_entries[] as $pb |
+        $pb.value[]? |
         (if (.HostPort // "") == "" then
-           $e.key
+           $pb.key
          else
            (if ((.HostIp // "") != "" and (.HostIp) != "0.0.0.0") then (.HostIp + ":") else "" end)
-           + .HostPort + ":" + $e.key
+           + .HostPort + ":" + $pb.key
          end) as $mapping |
         ("--publish", $mapping)
       ] | flatten ) +
@@ -1609,12 +1663,11 @@ get_run_command() {
     (if ($c.Config.Tty // false) then ["-t"] else [] end) +
     (if ($c.Config.OpenStdin // false) then ["-i"] else [] end) +
 
-    (if ($c.Config.Entrypoint != null) and ($c.Config.Entrypoint != ($ic.Entrypoint // null))
-       then ["--entrypoint", ($c.Config.Entrypoint[0] // "")] else [] end) +
+    (if ($e.Entrypoint != null) then ["--entrypoint", ($e.Entrypoint[0] // "")] else [] end) +
 
     [$c.Config.Image] +
 
-    (arr($c.Config.Cmd))
+    (if ($e.Cmd != null) then $e.Cmd else [] end)
   ' 2>/dev/null)
 
   if [[ -z "$args" || "$args" == "null" ]]; then
@@ -1643,20 +1696,33 @@ get_run_command() {
 #   - a host port that was left for Docker to assign randomly (original
 #     HostPort == "") - normalized to the literal string "random" on
 #     both sides so two different assigned ports don't show as a diff
+#
+# WorkingDir/Entrypoint/Cmd are fingerprinted via explicit_config (the same
+# helper get_run_command uses), not their raw resolved values: each
+# container is diffed against its OWN creation image (self-referential via
+# its own .Image field), so a value legitimately inherited from a new
+# image's defaults - never explicitly set on either container - doesn't
+# show up as a mismatch, while a genuine reconstruction gap (the script
+# failed to reproduce an actual override) still does.
 normalized_config() {
-  local name="$1"
-  $ENGINE inspect --format '{{json .}}' "$name" 2>/dev/null | jq -S '
+  local name="$1" cjson image_id ijson ejson
+  cjson=$($ENGINE inspect --format '{{json .}}' "$name" 2>/dev/null) || return 1
+  image_id=$(jq -r '.Image // empty' <<<"$cjson")
+  ijson=$($ENGINE image inspect --format '{{json .Config}}' "$image_id" 2>/dev/null) || ijson='{}'
+  ejson=$(explicit_config "$cjson" "$ijson")
+
+  jq -n --argjson c "$cjson" --argjson e "$ejson" -S '
     {
       Config: {
-        User: .Config.User,
-        WorkingDir: .Config.WorkingDir,
-        Tty: .Config.Tty,
-        OpenStdin: .Config.OpenStdin,
-        Entrypoint: .Config.Entrypoint,
-        Cmd: .Config.Cmd,
-        ExposedPorts: ((.Config.ExposedPorts // {}) | keys | sort)
+        User: $c.Config.User,
+        WorkingDir: $e.WorkingDir,
+        Tty: $c.Config.Tty,
+        OpenStdin: $c.Config.OpenStdin,
+        Entrypoint: $e.Entrypoint,
+        Cmd: $e.Cmd,
+        ExposedPorts: (($c.Config.ExposedPorts // {}) | keys | sort)
       },
-      HostConfig: (.HostConfig | {
+      HostConfig: ($c.HostConfig | {
         NetworkMode,
         RestartPolicy,
         Privileged,
@@ -1686,7 +1752,7 @@ normalized_config() {
           }) | sort_by(.key)
         )
       }),
-      Mounts: ((.Mounts // []) | map(
+      Mounts: (($c.Mounts // []) | map(
           if .Type == "bind" then {Type, Destination, Source, RW}
           else {Type, Destination, RW}
           end
@@ -2478,7 +2544,7 @@ for name in "${CONTAINERS[@]}"; do
   fi
 
   log "  Capturing current run command..."
-  run_cmd=$(get_run_command "$name" "$image")
+  run_cmd=$(get_run_command "$name" "$(map_get OLD_ID_OF "$name")")
 
   systemd_unit=""
   systemd_unit_source=""

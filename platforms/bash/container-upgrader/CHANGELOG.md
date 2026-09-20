@@ -12,6 +12,35 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.7-dev2
+Fixes a bug where an upgraded container's run command could be recreated
+with a stale `--entrypoint` (or `--workdir`/`--env`/`--label`/trailing `cmd`
+args) inherited from the *old* image, even though the user never explicitly
+set it. `get_run_command()` determines which flags to reproduce by diffing
+the container's current config against an image's own baked-in defaults —
+but that baseline image was the already-pulled *new* image, not the
+original one the container was actually created from. For fields that just
+mirror the image's default when not explicitly overridden (entrypoint,
+workdir, cmd — replace-only; env, labels — image-default-plus-explicit),
+this meant: if the old and new image versions changed one of these defaults
+(e.g. the image's entrypoint script was renamed between versions) and the
+container never explicitly overrode it, the reconstructed command pinned
+the *old* value forward as if it had been explicit — for entrypoint, this
+can mean `--entrypoint <path that only existed in the old image>`, which
+fails to start outright on the new image. Fixed by diffing against the
+original image the container was created from (new shared helper,
+`explicit_config()`) instead — a value that was never actually explicit is
+now correctly left out, letting the new container fall through to the new
+image's own default. The safe-mode config check (`normalized_config()`,
+which compares the recreated container's config against the original to
+catch drift the reconstruction missed) was updated the same way: it now
+diffs each container against its own creation image before comparing, so a
+value that's legitimately different only because it now tracks a new
+image's own default no longer reads as a mismatch and triggers a spurious
+rollback. `cmd` — previously always reproduced literally regardless of
+whether it was ever explicit — is now diffed the same way as the other
+fields, closing the same class of gap there too.
+
 ## 1.1.7-dev1
 Adds manual systemd-unit-managed restart support
 (`docs/requirements/pending/manual-systemd-unit-label.md`): a container can

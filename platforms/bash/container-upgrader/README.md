@@ -253,7 +253,17 @@ Name, hostname (if overridden), user, workdir (if overridden), env vars
 image default), published ports, bind/volume/tmpfs mounts, network mode (if
 non-default), restart policy, privileged, cap-add/cap-drop, devices, extra
 hosts, memory limit, cpu limit, security-opt, dns, tty/stdin flags,
-entrypoint override (first element only), and cmd.
+entrypoint override (first element only), and cmd (if overridden).
+
+Workdir/env/labels/entrypoint/cmd are all diffed against the **original**
+image the container was actually created from, not the new image it's
+being upgraded to. This matters: if a container never explicitly set one of
+these (it just inherited the old image's default), that value is left out
+of the reconstructed command entirely, so the new container picks up the
+new image's own default for it instead of getting stuck on the old value —
+e.g. if an image's default entrypoint path changes between versions, an
+upgraded container that never overrode it starts on the new entrypoint, not
+a stale path that may no longer exist in the new image.
 
 ### Known limitations
 
