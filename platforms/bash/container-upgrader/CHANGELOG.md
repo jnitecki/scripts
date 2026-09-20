@@ -1,6 +1,6 @@
-# Changelog — container-upgrade.sh
+# Changelog — container-upgrader.sh
 
-Complete version history for `container-upgrade.sh`, newest entry first —
+Complete version history for `container-upgrader.sh`, newest entry first —
 every version bump gets its own entry here, pre-releases included. The
 script's own header keeps a much shorter, **stable-versions-only** window
 (3 entries, most recent in full): a pre-release bump never gets its own
@@ -11,6 +11,29 @@ stable-version entry here, *alongside* (not replacing) the individual
 pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
+
+## 1.1.7-dev1
+Adds manual systemd-unit-managed restart support
+(`docs/requirements/pending/manual-systemd-unit-label.md`): a container can
+now opt into the same `systemctl`-based restart Podman Quadlet gets
+automatically, via a manual `systemd.unit` label (checked before
+`PODMAN_SYSTEMD_UNIT`). Restart scope (`--user` vs. system) is now resolved
+per container via a new `systemd.scope` label plus engine rootless/rootful
+introspection (`podman`/`docker info`) and a unit-file-existence check, in
+place of the previous hardcoded `--user`, which was only correct for the
+common rootless-Quadlet case — a rootful/system Quadlet setup was silently
+broken before this. Three new outcomes (`systemd_unit_scope_mismatch`,
+`systemd_unit_not_found`, `systemd_unit_permission_denied`) leave a
+container fully untouched — no `systemctl` attempt, no fallback to
+`simple`/`safe` — whenever the script already knows in advance it cannot
+safely restart the unit; an ordinary `systemctl` failure or poll timeout
+still falls back exactly as before. New success outcome
+`upgraded_via_manual_unit`, distinct from `upgraded_via_quadlet`, since a
+manually-labeled container isn't necessarily genuine Quadlet. New
+`--skip-manual-unit-restart`/`--skip-systemd-restart` options;
+`--skip-quadlet-restart` is unchanged but now scoped to only the
+`PODMAN_SYSTEMD_UNIT` trigger. `restart_via_quadlet()` was generalized into
+`restart_via_systemd_unit()`, shared by both triggers.
 
 ## 1.1.6
 Implements the repo-wide maintenance conventions from

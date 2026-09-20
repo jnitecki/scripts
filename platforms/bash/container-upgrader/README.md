@@ -1,9 +1,43 @@
-# container-upgrade
+# container-upgrader
 
 Iterates running Docker/Podman containers, pulls the latest image for each
 (once per unique image), and recreates every container whose image actually
 changed — or every targeted container if `--restart-all` is given — using
 the same runtime settings as before.
+
+## Motivation
+
+In a home-lab or small self-hosted setup where Docker or Podman is used
+directly (without a heavier orchestrator), keeping containers up to date
+is a bigger logistical challenge than it first appears. Tagging a
+container with `latest` doesn't mean it stays current — the image is
+only re-pulled when the container is actually (re)started, and even
+`--pull=always` (which forces a fresh pull on every `run`) has a sharp
+edge: if that pull fails, the container fails to start instead of
+falling back to the last-known-good image that's still cached locally.
+On top of that, restarting a container correctly means reproducing every
+original run flag, which in practice means maintaining a separate script
+to (re)start it — unless startup is already delegated to systemd or a
+similar service manager.
+
+container-upgrader exists to remove that friction: it pulls the newest
+image for each tag in use, detects which containers are actually
+affected by a change, and restarts only those — reproducing their
+original configuration automatically. In its default `safe` mode, it
+also protects against a bad upgrade: if the new container fails to
+start, or fails a post-upgrade health check within a configurable
+timeout, it automatically rolls back to the previous image (this
+doesn't apply to containers using Docker/Podman's `--rm` auto-removal,
+or to containers that were already unhealthy before the upgrade — both
+fall back to the simpler, non-rolling-back restart path automatically).
+Containers managed by **Podman Quadlet**, or by a hand-written systemd
+unit, are handled correctly too: instead of restarting the container
+directly, container-upgrader restarts the systemd unit that owns it,
+letting it regenerate the container the way it's meant to.
+
+Finally, container-upgrader keeps itself current the same way it keeps
+your containers current — via the repository's standard self-upgrade
+mechanism — so there's one less thing to remember to update by hand.
 
 ## Requirements
 
@@ -18,7 +52,7 @@ The run command for each container is reconstructed locally from
 ## Usage
 
 ```
-./container-upgrade.sh [options] [container names...]
+./container-upgrader.sh [options] [container names...]
 ```
 
 If no container names are given, all running containers are targeted.
@@ -75,27 +109,75 @@ If nothing reappears within the wait window, the container is treated
 exactly as before this feature existed — the normal `simple`/`safe` restart
 proceeds unchanged.
 
-## Quadlet-managed restart
+## Systemd-managed restart
 
-A container carrying Podman's `PODMAN_SYSTEMD_UNIT` label (i.e. started by
-Quadlet) is restarted differently from the above: instead of reconstructing
-its flags or stopping/renaming/running it directly, the script restarts its
-owning systemd unit with `systemctl --user restart <unit>` and validates
-the result — polling up to `--external-restart-wait` seconds (the same
-setting used by external-restart detection) for the unit to report active
-and a same-named container to come back running on the newly-pulled image.
+A container owned by a systemd unit is restarted differently from the
+above: instead of reconstructing its flags or stopping/renaming/running it
+directly, the script restarts its owning unit with `systemctl restart
+<unit>` and validates the result — polling up to `--external-restart-wait`
+seconds (the same setting used by external-restart detection) for the unit
+to report active and a same-named container to come back running on the
+newly-pulled image.
 
 This applies regardless of `--mode`, and skips the normal restart entirely
 when it succeeds — no flag reconstruction is required up front, the
 container is never stopped directly, and there's no config diff against
-the original (Quadlet rebuilds the container from its own `.container`
-file, not from anything this script generated).
+the original (the unit rebuilds the container itself, not from anything
+this script generated).
 
-If the `systemctl` restart doesn't succeed within the wait window — the
-command itself failed, the unit never became active, or the container came
-back still on the old image — the container falls through to the normal
-`simple`/`safe` restart above, unchanged. Use `--skip-quadlet-restart` to
-disable this path and manage such containers like any other.
+A container is recognized as systemd-managed in either of two ways,
+checked in this order:
+
+1. A manual **`systemd.unit`** label, naming the unit yourself — for a
+   container started by a hand-written unit (`ExecStart=<engine> run ...`),
+   which never gets Podman's automatic label below. Opt in by adding
+   `--label systemd.unit=<unit-name>` to how the container is run.
+2. Podman's automatic **`PODMAN_SYSTEMD_UNIT`** label, set on every
+   container Podman Quadlet starts from a `.container` file. No setup
+   needed — this is what made Quadlet containers "just work" before the
+   manual label existed.
+
+### Restart scope: `--user` vs. system
+
+Before calling `systemctl`, the script resolves whether the unit is a
+`--user` (rootless) unit or a system-wide one, since neither trigger above
+is reliably one or the other:
+
+- **Podman** — resolved automatically from `podman info` (rootless vs.
+  rootful); an optional **`systemd.scope`** label (`user`/`system`) must
+  match that reality or the restart is refused (see below).
+- **Docker, rootless mode** — same idea, resolved from `docker info`.
+- **Docker, standard (rootful) install** — the daemon is a single shared
+  instance, so its own state says nothing about whether a given
+  container's unit is user- or system-scoped; that's decided independently
+  per container by whoever wrote its unit file. Set the `systemd.scope`
+  label explicitly, or leave it unset and the script will look for a
+  matching unit file at both scopes (user checked first).
+
+Whatever scope is resolved, the script also confirms a matching unit file
+actually exists there before doing anything. If any of this can't be
+resolved safely, the container is **left completely untouched** — no
+`systemctl` attempt, and (unlike an ordinary `systemctl` failure or
+timeout, which still falls through to the normal `simple`/`safe` restart)
+**no fallback restart either**, since a failure at this stage means the
+script already knows the container is meant to be systemd-owned and
+specifically why it can't safely act on it:
+
+| Outcome | Meaning |
+| --- | --- |
+| `systemd_unit_scope_mismatch` | A `systemd.scope` label was set but doesn't match the engine's actual rootless/rootful state (or isn't `user`/`system`). |
+| `systemd_unit_not_found` | No unit file exists at the resolved scope. |
+| `systemd_unit_permission_denied` | The resolved scope is `system`, but the script isn't running as root. It never invokes `sudo` itself — run the whole script as root, or grant equivalent privilege, to restart system-scoped units. |
+
+If the `systemctl` restart itself doesn't succeed within the wait window —
+the command failed for some other reason, the unit never became active, or
+the container came back still on the old image — the container falls
+through to the normal `simple`/`safe` restart above, unchanged.
+
+Use `--skip-quadlet-restart` to disable only the automatic
+`PODMAN_SYSTEMD_UNIT` trigger, `--skip-manual-unit-restart` to disable only
+the manual `systemd.unit` trigger, or `--skip-systemd-restart` to disable
+this whole mechanism and manage every container like any other.
 
 ## Options
 
@@ -106,8 +188,10 @@ disable this path and manage such containers like any other.
 | `--timeout N` | Seconds to monitor the new container after starting it (default: `30`). |
 | `--precheck-seconds N` | Seconds to observe a container before touching it, to determine whether it is already crashing (default: `5`). This is a live fallback poll; see `--recent-restart-threshold` for the faster check that runs first. |
 | `--recent-restart-threshold N` | Before the live `--precheck-seconds` poll, check `RestartCount` and the timestamp of the container's most recent (re)start (not its original creation time). If it has restarted at least once and that restart happened within the last `N` seconds, or it has a healthcheck stuck in "starting" for longer than `N` seconds, it's flagged as crashing immediately — no waiting required. Default: `180` (3 minutes). |
-| `--external-restart-wait N` | Seconds to wait after stopping a container to see whether something other than this script (systemd/Quadlet, another supervisor, a human) restarts or recreates it on its own, before falling through to the normal restart. Also the wait used to validate a Quadlet-managed restart (see below). See [External-restart detection](#external-restart-detection). Default: `15`. |
-| `--skip-quadlet-restart` | Do not use `systemctl --user restart` for a container managed by Podman Quadlet (`PODMAN_SYSTEMD_UNIT` label present); manage it like any other container instead. See [Quadlet-managed restart](#quadlet-managed-restart). Default: off (Quadlet-managed containers use `systemctl`). |
+| `--external-restart-wait N` | Seconds to wait after stopping a container to see whether something other than this script (systemd/Quadlet, another supervisor, a human) restarts or recreates it on its own, before falling through to the normal restart. Also the wait used to validate a systemd-managed restart (see below). See [External-restart detection](#external-restart-detection). Default: `15`. |
+| `--skip-quadlet-restart` | Do not use the systemd-managed restart path for a container carrying Podman's automatic `PODMAN_SYSTEMD_UNIT` label; manage it like any other container instead. A manual `systemd.unit` label still triggers the path unless one of the two options below is also set. See [Systemd-managed restart](#systemd-managed-restart). Default: off. |
+| `--skip-manual-unit-restart` | Do not use the systemd-managed restart path for a container whose only trigger is a manual `systemd.unit` label; a `PODMAN_SYSTEMD_UNIT` label still triggers it. See [Systemd-managed restart](#systemd-managed-restart). Default: off. |
+| `--skip-systemd-restart` | Do not use the systemd-managed restart path at all, for either trigger. See [Systemd-managed restart](#systemd-managed-restart). Default: off. |
 | `--skip-crashing` | Do not attempt to upgrade containers detected as already crashing before the upgrade. Default is to attempt them anyway (see policy above). |
 | `--engine docker\|podman` | Container engine to use. If omitted, auto-detects: docker if present, else podman, else errors out. |
 | `--skip-config-check` | In safe mode, skip comparing the recreated container's runtime config against the original. Use if a specific container reliably shows a diff you've already verified is harmless. |

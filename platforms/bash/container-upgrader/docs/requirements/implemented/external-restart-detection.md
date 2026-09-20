@@ -1,7 +1,7 @@
 # Requirement: External-Restart Detection During Upgrade
 
 ## Scope
-`container-upgrade.sh`'s restart strategies (`simple` and `safe`) currently
+`container-upgrader.sh`'s restart strategies (`simple` and `safe`) currently
 guard against one specific interference source: the container engine's own
 `--restart always` policy bringing the container back up on its old image
 while it sits stopped mid-upgrade (see version-history entry 1.1.3, the

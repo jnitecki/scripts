@@ -1,7 +1,7 @@
 # Requirement: Restart Quadlet-Managed Containers via systemctl
 
 ## Scope
-`container-upgrade.sh` currently treats every targeted container the same
+`container-upgrader.sh` currently treats every targeted container the same
 way: capture its run command via `get_run_command`, then hand it to
 `restart_simple` or `restart_safe`, both of which stop the container
 directly and either recreate it in place (`simple`) or rename/start/verify/

@@ -1,6 +1,6 @@
 # Self-upgrade implementation notes
 
-Tracks how `container-upgrade.sh`'s self-upgrade mechanism is actually
+Tracks how `container-upgrader.sh`'s self-upgrade mechanism is actually
 implemented, kept in sync with the code. If a feature or its code is
 removed, remove its section here too. This file covers only what's
 specific to this script; the generic, cross-cutting convention it
@@ -10,7 +10,7 @@ implements lives in `docs/requirements/generic/` at the repo root (see
 Requirement: `docs/requirements/generic/script-upgrade-convention.md`.
 Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
 `autoupdate`/`update` predecessors in the same rework). Identity:
-`Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade`.
+`Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader`.
 
 - **Code organization**: every `upgrade_*` function lives in one
   contiguous block (between matching `# ===...=== Self-upgrade ... begins`
@@ -46,7 +46,7 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   file-writable, cache-dir-writable, or unconditional, respectively.
   `--upgrade-type` is a ceiling, never escalated past.
 - **Persistent cache (link mode)**: `upgrade_cache_dir`/`upgrade_cache_file`
-  resolve to `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/bash/container-upgrade/container-upgrade.sh`.
+  resolve to `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/bash/container-upgrader/container-upgrader.sh`.
   `upgrade_prepare_candidate` checks a cache hit's hash against the
   winning tag's declared hash before deciding whether to download at all.
 - **Download validation**: `bash -n` against the fetched content via
@@ -88,7 +88,7 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   the banner note itself couldn't be observed live since the only tag
   currently on the remote (`v1.0.7`) predates this rework and doesn't know
   the new guard var name.
-- **Cooldown cache**: `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/bash_container-upgrade.state`,
+- **Cooldown cache**: `${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/bash_container-upgrader.state`,
   a single Unix-epoch timestamp, 20-minute window
   (`UPGRADE_COOLDOWN_SECONDS`), written best-effort. Only gates a fully
   implicit invocation — any of `--upgrade-type`/`--upgrade-level`/
@@ -188,10 +188,10 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   `bash -c "$content" /dev/null "$@"`, giving the candidate a genuine `$0`
   with genuine content — see
   `docs/requirements/generic/script-upgrade-convention.md` section 8's
-  implementation note and `platforms/bash/container-upgrade/CHANGELOG.md`'s
+  implementation note and `platforms/bash/container-upgrader/CHANGELOG.md`'s
   `1.1.6-dev7` entry.
 - **`--help` grouping (1.1.5)**: the `# Options:` block now labels two
-  sub-groups — this script's own container-upgrade flags, and the
+  sub-groups — this script's own container-upgrader flags, and the
   self-upgrade flags (which upgrade the script file itself) — instead of
   one flat list, since both sets used the word "upgrade" for unrelated
   things. Purely a `--help` text change; no flag behavior moved or
@@ -220,7 +220,7 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
     line-number fragility 1.1.5's note above already flagged — marker
     regions never need updating when unrelated header content changes.
   - **`CHANGELOG.md`**: the complete 1.0.0-1.1.5 history moved to
-    `platforms/bash/container-upgrade/CHANGELOG.md`, newest first; the
+    `platforms/bash/container-upgrader/CHANGELOG.md`, newest first; the
     script header keeps only its 3 most recent entries, **also newest
     first** (most recent in full, two after it abbreviated) — matching
     `CHANGELOG.md`'s ordering, unlike the old in-script convention which
@@ -232,7 +232,7 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
     the number itself — used only when `X.Y.Z` is already equal, so
     `1.2.3-dev1 < 1.2.3-dev2`. Applied to the bash blueprint first (per
     the new blueprint-first-then-replicate rule), then to
-    `container-upgrade.sh`.
+    `container-upgrader.sh`.
   - **Real bug found and fixed along the way**: `upgrade_parse_versions`
     used to reduce every discovered tag to bare `X.Y.Z` (`v="${r%%-*}"`)
     before it ever reached `upgrade_download`/`upgrade_fetch_tag_hash` —

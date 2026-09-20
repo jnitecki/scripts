@@ -2,8 +2,8 @@
 <!-- CATEGORY-FILES: CONTAINERS.md -->
 # Script Catalog
 
-_Generated 2026-09-13 16:31 UTC. Regenerate with `tools/generate-catalog.sh`._
+_Generated 2026-09-20 08:17 UTC. Regenerate with `tools/generate-catalog.sh`._
 
 | Name | Description | Categories | Platforms |
 |---|---|---|---|
-| container-upgrade | Docker image upgrade automation with rollback support | containers | bash |
+| container-upgrader | Docker image upgrade automation with rollback support | containers | bash |

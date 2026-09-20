@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.1.6
+# Version: 1.1.7-dev1
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
-# Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrade
+# Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
 #
 # HELP:IDENTITY:BEGIN
 # Version history (bump per docs/requirements/generic/script-maintenance-
@@ -14,72 +14,28 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.6 - implements the repo-wide
-#           maintenance conventions from script-maintenance-convention.md:
-#           (1) --help is now layered - bare --help/self-upgrade options
-#           only on --help upgrade/both on --help full; (2) full history
-#           moved to CHANGELOG.md, this header trimmed to a stable-only
-#           window; (3) version-bump scheme changed - a suffixed version
-#           increments its trailing number, a bare version bumps the patch
-#           and starts a fresh -dev1 cycle; (4) self-upgrade version
-#           comparison now strips a trailing revision number before
-#           computing level and uses it as a tiebreaker when X.Y.Z and
-#           level are equal, so consecutive same-patch pre-release tags are
-#           actually recognized as upgrades - fixed alongside this,
-#           upgrade_parse_versions no longer discards a tag's suffix, which
-#           had silently broken download/hash-fetch URLs for any
-#           pre-release tag; (5) this window now shows stable versions
-#           only - every pre-release bump since the last stable release is
-#           consolidated into one running entry here instead of getting its
-#           own line, updated in place on each
-#           further pre-release bump until promoted to stable, at which
-#           point CHANGELOG.md gains a matching consolidated stable entry
-#           alongside the individual pre-release entries it already
-#           recorded (CHANGELOG.md itself is unaffected by this
-#           consolidation - every bump, pre-release included, keeps its own
-#           entry there); (6) the cooldown cache now only gates a fresh
-#           remote check - local apply-mode eligibility is always
-#           re-evaluated, so an already-cached candidate can still be
-#           promoted straight to "replacement"/"overwrite" on a
-#           cooldown-gated run if that eligibility has newly escalated past
-#           "link" (e.g. invoked via sudo this time); and "replacement"/
-#           "overwrite" now explicitly carry over the original file's
-#           permissions and ownership (ownership best-effort) instead of
-#           whatever the write happened to produce; (7) safe mode now
-#           detects a container started with --rm (AutoRemove) and falls
-#           back to simple mode for just that container, since AutoRemove
-#           destroys the container the instant it's stopped, breaking the
-#           rename-based rollback; rollback() itself no longer claims
-#           success unconditionally - it now verifies the rename/start
-#           actually worked before saying so; (8) implements the
-#           previously-pending external-restart-detection requirement -
-#           both restart strategies now wait up to --external-restart-wait
-#           seconds after stopping a container to see whether systemd/
-#           Quadlet or another supervisor already recreated it, and if so
-#           classify the outcome (upgraded/reverted/config-discrepancy)
-#           instead of racing it with their own rename/rm/run; (9) a
-#           container carrying Podman's PODMAN_SYSTEMD_UNIT label
-#           (Quadlet-managed) now skips flag reconstruction and direct
-#           stop/rename/run entirely - its owning unit is restarted via
-#           `systemctl --user restart` and the result validated (running
-#           again, on the new image, within --external-restart-wait
-#           seconds); only on failure does it fall through to the normal
-#           simple/safe restart. New `--skip-quadlet-restart` opts out;
-#           (10) fixed self-upgrade "overwrite"/"memory" apply modes
-#           misreporting themselves as version "unknown" in their own
-#           startup banner during the trial run - the /dev/null placeholder
-#           previously used as the candidate's $0 (1.1.4's fix for a
-#           different bug, a hang) is real but empty, so its
-#           version-detection grep found no `# Version:` line to read. The
-#           candidate is now run from a real scratch file containing its
-#           actual content instead, so version detection finds both a real
-#           filename (no hang) and real content (correct version).
-#           See CHANGELOG.md for full detail on all ten.
+#   1.1.7 (in progress - currently 1.1.7-dev1) - adds manual systemd-unit-
+#           managed restart support: a container can now opt into the same
+#           systemctl-based restart Podman Quadlet gets automatically, via a
+#           manual `systemd.unit` label (checked before PODMAN_SYSTEMD_UNIT).
+#           Restart scope (--user vs. system) is now resolved per container
+#           via a new `systemd.scope` label plus engine rootless/rootful
+#           introspection (`podman`/`docker info`), fixing a latent gap in
+#           the existing Quadlet path too - it previously hardcoded --user
+#           unconditionally, correct only for the common rootless case.
+#           Three new outcomes (systemd_unit_scope_mismatch/_not_found/
+#           _permission_denied) leave a container fully untouched - no
+#           systemctl attempt, no fallback to simple/safe - whenever the
+#           script already knows in advance that it cannot safely restart it
+#           via systemd. New `--skip-manual-unit-restart`/
+#           `--skip-systemd-restart` options; `--skip-quadlet-restart` is
+#           unchanged but now scoped to only the PODMAN_SYSTEMD_UNIT trigger.
+#   1.1.6 - implements the repo-wide maintenance conventions from
+#           script-maintenance-convention.md (layered --help, CHANGELOG.md,
+#           the numbered-suffix versioning scheme) plus several real bugs
+#           found and fixed along the way; see CHANGELOG.md for detail.
 #   1.1.5 - --help visually separates this script's own options from the
 #           self-upgrade options under two labeled groups.
-#   1.1.4 - fixed a self-upgrade hang in "overwrite"/"memory" apply modes:
-#           the candidate's $0 was the literal string "--", tripping up its
-#           own version-detection `grep ... "$0"` into reading stdin.
 # HELP:IDENTITY:END
 #
 # HELP:INTRO:BEGIN
@@ -120,13 +76,22 @@
 # run at all; the outcome is classified instead (upgraded/reverted/config
 # mismatch) - see --help full for details.
 #
-# A container carrying Podman's PODMAN_SYSTEMD_UNIT label (i.e. started by
-# Quadlet) skips flag reconstruction and direct stop/rename/run entirely -
-# instead its owning unit is restarted via `systemctl --user restart`, then
-# validated the same way (running again, on the new image, within
-# --external-restart-wait seconds). Only if that doesn't succeed does the
-# container fall through to the normal simple/safe restart above. See
-# --skip-quadlet-restart to opt out.
+# A container owned by a systemd unit - either Podman Quadlet (via its
+# automatic PODMAN_SYSTEMD_UNIT label) or a hand-written unit (via a manual
+# systemd.unit label, checked first) - skips flag reconstruction and direct
+# stop/rename/run entirely: instead its owning unit is restarted via
+# `systemctl [--user] restart`, then validated the same way (running again,
+# on the new image, within --external-restart-wait seconds). Restart scope
+# (--user vs. system) is resolved per container from an optional
+# systemd.scope label plus engine rootless/rootful introspection; if the
+# script determines it cannot safely restart the unit (a declared scope
+# that doesn't match reality, a unit that doesn't exist at the resolved
+# scope, or a system-scope restart with no permission to attempt it), the
+# container is left completely untouched - no fallback restart is
+# attempted, unlike an ordinary systemctl failure or timeout, which still
+# falls through to the normal simple/safe restart below. See
+# --skip-quadlet-restart/--skip-manual-unit-restart/--skip-systemd-restart
+# to opt out, and --help full for the exact resolution algorithm.
 #
 # Requires: docker (or podman, see --engine) and jq. The run command for
 # each container is reconstructed locally from `<engine> inspect` JSON
@@ -159,7 +124,7 @@
 #
 # HELP:USAGE:BEGIN
 # Usage:
-#   ./container-upgrade.sh [options] [container names...]
+#   ./container-upgrader.sh [options] [container names...]
 # HELP:USAGE:END
 #
 # HELP:CORE-OPTIONS:BEGIN
@@ -192,12 +157,21 @@
 #                        restarts or recreates it on its own, before
 #                        falling through to the normal manual restart.
 #                        Default: 15.
-#   --skip-quadlet-restart  Do not use systemctl to restart a container
-#                        managed by Podman Quadlet (PODMAN_SYSTEMD_UNIT
-#                        label present); manage it like any other
-#                        container instead (existing simple/safe
-#                        behavior). Default: off (Quadlet-managed
-#                        containers use systemctl).
+#   --skip-quadlet-restart  Do not use the systemctl restart path for a
+#                        container carrying Podman's automatic
+#                        PODMAN_SYSTEMD_UNIT label; manage it like any
+#                        other container instead. A manual systemd.unit
+#                        label still triggers the systemctl path unless
+#                        --skip-manual-unit-restart or
+#                        --skip-systemd-restart is also set. Default: off.
+#   --skip-manual-unit-restart  Do not use the systemctl restart path for
+#                        a container whose only trigger is a manual
+#                        systemd.unit label; a PODMAN_SYSTEMD_UNIT label
+#                        still triggers it. Default: off.
+#   --skip-systemd-restart  Do not use the systemctl restart path at all,
+#                        for either trigger. See --help full for the
+#                        systemd.unit/systemd.scope labels and the scope-
+#                        resolution algorithm. Default: off.
 #   --skip-crashing     Do not attempt to upgrade containers detected as
 #                        already crashing before the upgrade. Default is
 #                        to attempt them anyway (see policy above).
@@ -278,6 +252,8 @@ PRECHECK_SECONDS=5
 RECENT_RESTART_THRESHOLD=180
 EXTERNAL_RESTART_WAIT=15
 SKIP_QUADLET_RESTART=false
+SKIP_MANUAL_UNIT_RESTART=false
+SKIP_SYSTEMD_RESTART=false
 ENGINE=""
 ENGINE_EXPLICIT=false
 RESTART_ALL=false
@@ -307,7 +283,7 @@ HAD_ERRORS=false
 # script's own "# Upgrade-Source:" header line and its path under platforms/.
 SCRIPT_PATH="$0"
 SCRIPT_LANG="bash"
-SCRIPT_NAME="container-upgrade"
+SCRIPT_NAME="container-upgrader"
 UPGRADE_HOST="github.com"
 UPGRADE_OWNER="jnitecki"
 UPGRADE_REPO="scripts"
@@ -436,7 +412,7 @@ map_values() {
 # =============================================================================
 # Self-upgrade (docs/requirements/generic/script-upgrade-convention.md)
 # begins - every function down to the matching "ends" banner belongs to this
-# subsystem; nothing here is container-upgrade domain logic. Failures before
+# subsystem; nothing here is container-upgrader domain logic. Failures before
 # a candidate is trial-run are swallowed and reported only via
 # UPGRADE_BANNER_NOTE (section 9); a trial run's own failure is not
 # swallowed - its exit code becomes this invocation's exit code (section 8).
@@ -1066,7 +1042,7 @@ upgrade_check_main() {
 
 # --- section 12: --upgrade-only ---------------------------------------------
 # Performs the check and, if eligible, the actual upgrade, then exits -
-# never runs real container-upgrade work, so there is no trial run: a
+# never runs real container-upgrader work, so there is no trial run: a
 # validated candidate is persisted directly.
 upgrade_only_main() {
   if ! upgrade_prepare_candidate; then
@@ -1477,6 +1453,8 @@ while [[ $# -gt 0 ]]; do
       EXTERNAL_RESTART_WAIT="${2:-}"
       shift 2 ;;
     --skip-quadlet-restart) SKIP_QUADLET_RESTART=true; shift ;;
+    --skip-manual-unit-restart) SKIP_MANUAL_UNIT_RESTART=true; shift ;;
+    --skip-systemd-restart) SKIP_SYSTEMD_RESTART=true; shift ;;
     --engine)
       ENGINE="${2:-}"
       ENGINE_EXPLICIT=true
@@ -1512,7 +1490,7 @@ fi
 
 # --- self-upgrade: --upgrade-check / --upgrade-only exit before any --------
 # container-engine work; see sections 11-12. Neither ever reaches the
-# script's normal container-upgrade logic below.
+# script's normal container-upgrader logic below.
 [[ "$UPGRADE_CHECK" == "true" ]] && upgrade_check_main
 [[ "$UPGRADE_ONLY" == "true" ]] && upgrade_only_main
 
@@ -1978,16 +1956,24 @@ record_restart_policy_issue() {
 }
 
 # ---------------------------------------------------------------------------
-# Quadlet-managed restart
+# Systemd-unit-managed restart (Quadlet label, or manual systemd.unit label)
 # ---------------------------------------------------------------------------
 #
-# A container started by Podman Quadlet carries a PODMAN_SYSTEMD_UNIT label
-# naming the systemd unit that owns its lifecycle - the container itself is
-# really a side effect of that unit being active. Reconstructing/reapplying
-# its flags or stopping it directly (as the strategies below do) would race
-# systemd rather than cooperate with it, so such a container is instead
-# restarted by asking its own unit to restart - see
-# docs/requirements/implemented/quadlet-managed-restart.md.
+# A container may be owned by a systemd unit in one of two ways: Podman
+# Quadlet sets a PODMAN_SYSTEMD_UNIT label automatically on any container it
+# starts from a .container file, or an operator can manually add a
+# systemd.unit label to a container started by a hand-written unit
+# (ExecStart=<engine> run ...) to opt into the same treatment. Either way,
+# the container itself is really a side effect of that unit being active -
+# reconstructing/reapplying its flags or stopping it directly (as the
+# strategies below do) would race systemd rather than cooperate with it, so
+# such a container is instead restarted by asking its own unit to restart -
+# see docs/requirements/implemented/quadlet-managed-restart.md and
+# docs/requirements/pending/manual-systemd-unit-label.md.
+#
+# The restart itself needs to know whether that unit is a --user (rootless)
+# or system-wide unit - see resolve_systemd_scope() below - since neither
+# Podman Quadlet nor a hand-written unit is reliably one or the other.
 
 # Echoes $1's PODMAN_SYSTEMD_UNIT label value, or empty if unset/absent.
 # Uses the same JSON-dump-then-jq pattern as normalized_config rather than a
@@ -1998,29 +1984,155 @@ get_quadlet_unit() {
   $ENGINE inspect --format '{{json .Config.Labels}}' "$name" 2>/dev/null | jq -r '.PODMAN_SYSTEMD_UNIT // empty'
 }
 
-# Restarts a Quadlet-managed container ($1, owning unit $2) via
-# `systemctl --user restart` instead of managing it directly. Unlike
+# Echoes $1's manually-set systemd.unit label value, or empty if unset/absent.
+get_manual_systemd_unit() {
+  local name="$1"
+  $ENGINE inspect --format '{{json .Config.Labels}}' "$name" 2>/dev/null | jq -r '.["systemd.unit"] // empty'
+}
+
+# Echoes $1's systemd.scope label value ("user"/"system"), or empty if
+# unset/absent.
+get_systemd_scope_label() {
+  local name="$1"
+  $ENGINE inspect --format '{{json .Config.Labels}}' "$name" 2>/dev/null | jq -r '.["systemd.scope"] // empty'
+}
+
+# Echoes "true"/"false" for whether the current `podman` invocation is
+# rootless. Cached after the first call (PODMAN_ROOTLESS_CACHE) since it is
+# a property of the whole invocation, not of any one container.
+PODMAN_ROOTLESS_CACHE=""
+podman_is_rootless() {
+  if [[ -z "$PODMAN_ROOTLESS_CACHE" ]]; then
+    PODMAN_ROOTLESS_CACHE="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)"
+    [[ "$PODMAN_ROOTLESS_CACHE" == "true" || "$PODMAN_ROOTLESS_CACHE" == "false" ]] || PODMAN_ROOTLESS_CACHE="false"
+  fi
+  echo "$PODMAN_ROOTLESS_CACHE"
+}
+
+# Echoes "true"/"false" for whether the current `docker` invocation is
+# rootless mode. Cached after the first call, same reasoning as
+# podman_is_rootless(). Unlike Podman, a rootful (standard) Docker daemon's
+# state says nothing about any individual container's owning unit scope -
+# see resolve_systemd_scope()'s docker-rootful branch.
+DOCKER_ROOTLESS_CACHE=""
+docker_is_rootless() {
+  if [[ -z "$DOCKER_ROOTLESS_CACHE" ]]; then
+    if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q '"name=rootless"'; then
+      DOCKER_ROOTLESS_CACHE="true"
+    else
+      DOCKER_ROOTLESS_CACHE="false"
+    fi
+  fi
+  echo "$DOCKER_ROOTLESS_CACHE"
+}
+
+# Echoes "true"/"false" for whether unit $1 has a loadable unit file at
+# scope $2 ("user"/"system"). Read-only (list-unit-files), no privilege
+# needed just to check.
+systemd_unit_exists() {
+  local unit="$1" scope="$2"
+  if [[ "$scope" == "user" ]]; then
+    systemctl --user list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .
+  else
+    systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .
+  fi
+}
+
+# Resolves the restart scope ("user"/"system") for container $1 (engine $2,
+# unit $3), per docs/requirements/pending/manual-systemd-unit-label.md
+# section 3. Echoes the resolved scope on success, or one of three error
+# tokens (systemd_unit_scope_mismatch, systemd_unit_not_found,
+# systemd_unit_permission_denied) - the caller must not attempt a systemctl
+# restart, nor fall back to the normal simple/safe restart, on any of these
+# (see that requirement's section 4 for why).
+resolve_systemd_scope() {
+  local name="$1" engine="$2" unit="$3"
+  local scope_label scope rootless expected
+
+  scope_label="$($engine inspect --format '{{json .Config.Labels}}' "$name" 2>/dev/null | jq -r '.["systemd.scope"] // empty')"
+
+  if [[ -n "$scope_label" && "$scope_label" != "user" && "$scope_label" != "system" ]]; then
+    echo "systemd_unit_scope_mismatch"; return 0
+  fi
+
+  if [[ "$engine" == "podman" ]]; then
+    rootless="$(podman_is_rootless)"
+    expected="user"; [[ "$rootless" == "false" ]] && expected="system"
+    if [[ -n "$scope_label" && "$scope_label" != "$expected" ]]; then
+      echo "systemd_unit_scope_mismatch"; return 0
+    fi
+    scope="${scope_label:-$expected}"
+  else
+    if [[ "$(docker_is_rootless)" == "true" ]]; then
+      if [[ -n "$scope_label" && "$scope_label" != "user" ]]; then
+        echo "systemd_unit_scope_mismatch"; return 0
+      fi
+      scope="user"
+    else
+      if [[ -n "$scope_label" ]]; then
+        scope="$scope_label"
+      elif systemd_unit_exists "$unit" "user"; then
+        scope="user"
+      elif systemd_unit_exists "$unit" "system"; then
+        scope="system"
+      else
+        echo "systemd_unit_not_found"; return 0
+      fi
+    fi
+  fi
+
+  if ! systemd_unit_exists "$unit" "$scope"; then
+    echo "systemd_unit_not_found"; return 0
+  fi
+
+  if [[ "$scope" == "system" && "$EUID" -ne 0 ]]; then
+    echo "systemd_unit_permission_denied"; return 0
+  fi
+
+  echo "$scope"
+}
+
+# Restarts a systemd-unit-managed container ($1, owning unit $2, restart
+# scope $4 "user"/"system", detected via $5 "quadlet"/"manual") via
+# `systemctl [--user] restart` instead of managing it directly. Unlike
 # detect_external_restart, this script is deliberately initiating the
 # restart, not passively detecting one initiated elsewhere: no direct stop
 # happens here (so the 1.1.3 restart-policy relax/restore doesn't apply to
 # this attempt), and there is no normalized_config diff (the new container
-# is produced entirely by Quadlet from its .container unit file - nothing
-# this script generated to diff against).
+# is produced entirely by systemd from the unit file - nothing this script
+# generated to diff against).
 #
-# Echoes "upgraded_via_quadlet" on success. Echoes "" if it did not succeed
-# (the systemctl call itself failed, the unit never became active, the
-# container never came back running, or it came back still on the old
-# image) - the caller falls through to the normal restart_simple/
-# restart_safe path unchanged in that case; the specific reason is only
-# logged, not classified, since every such reason leads to the same
-# fallback action.
-restart_via_quadlet() {
-  local name="$1" unit="$2" new_id="$3"
-  local out waited cur_id
+# Echoes "upgraded_via_quadlet" or "upgraded_via_manual_unit" on success
+# (per $5). Echoes "" if it did not succeed (the systemctl call itself
+# failed, the unit never became active, the container never came back
+# running, or it came back still on the old image) - the caller falls
+# through to the normal restart_simple/restart_safe path unchanged in that
+# case; the specific reason is only logged, not classified, since every
+# such reason leads to the same fallback action. This is the only failure
+# mode that falls back - resolve_systemd_scope()'s three error tokens are
+# handled entirely by the caller, before this function is ever invoked.
+restart_via_systemd_unit() {
+  local name="$1" unit="$2" new_id="$3" scope="$4" source="$5"
+  local out waited cur_id user_flag label success_outcome tag cmd_display
 
-  log "  [quadlet] $name is managed by systemd unit '$unit' - restarting via 'systemctl --user restart' instead of managing it directly..."
-  if ! out=$(systemctl --user restart "$unit" 2>&1); then
-    log "  [quadlet] 'systemctl --user restart $unit' failed: $out"
+  user_flag=(); cmd_display="systemctl"
+  if [[ "$scope" == "user" ]]; then
+    user_flag=(--user)
+    cmd_display="systemctl --user"
+  fi
+  if [[ "$source" == "manual" ]]; then
+    tag="systemd-unit"
+    label="$name carries a manual 'systemd.unit' label naming '$unit' (scope: $scope)"
+    success_outcome="upgraded_via_manual_unit"
+  else
+    tag="quadlet"
+    label="$name is managed by systemd unit '$unit' (scope: $scope)"
+    success_outcome="upgraded_via_quadlet"
+  fi
+
+  log "  [$tag] $label - restarting via '$cmd_display restart' instead of managing it directly..."
+  if ! out=$(systemctl "${user_flag[@]}" restart "$unit" 2>&1); then
+    log "  [$tag] '$cmd_display restart $unit' failed: $out"
     echo ""
     return 0
   fi
@@ -2029,18 +2141,18 @@ restart_via_quadlet() {
   while [[ "$waited" -lt "$EXTERNAL_RESTART_WAIT" ]]; do
     sleep 1
     waited=$((waited + 1))
-    if [[ "$(systemctl --user is-active "$unit" 2>/dev/null)" == "active" ]] \
+    if [[ "$(systemctl "${user_flag[@]}" is-active "$unit" 2>/dev/null)" == "active" ]] \
        && [[ "$($ENGINE inspect --format '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]]; then
       cur_id=$($ENGINE inspect --format '{{.Image}}' "$name" 2>/dev/null)
       if [[ "$cur_id" == "$new_id" ]]; then
-        log "  [quadlet] $name is running again on the new image after ${waited}s."
-        echo "upgraded_via_quadlet"
+        log "  [$tag] $name is running again on the new image after ${waited}s."
+        echo "$success_outcome"
         return 0
       fi
     fi
   done
 
-  log "  [quadlet] $name did not come back running on the new image within ${EXTERNAL_RESTART_WAIT}s - falling back to the normal restart path."
+  log "  [$tag] $name did not come back running on the new image within ${EXTERNAL_RESTART_WAIT}s - falling back to the normal restart path."
   echo ""
 }
 
@@ -2244,7 +2356,7 @@ if [[ ${#CONTAINERS[@]} -eq 0 ]]; then
   exit 0
 fi
 
-log "container-upgrade.sh v${SCRIPT_VERSION}${UPGRADE_BANNER_NOTE}"
+log "container-upgrader.sh v${SCRIPT_VERSION}${UPGRADE_BANNER_NOTE}"
 log "Engine: $ENGINE | Mode: $MODE | Timeout: ${TIMEOUT}s | Precheck: ${PRECHECK_SECONDS}s | Recent-restart-threshold: ${RECENT_RESTART_THRESHOLD}s | Restart-all: $RESTART_ALL | Skip-crashing: $SKIP_CRASHING"
 
 # IMAGE_OF, OLD_ID_OF, NEW_ID_OF_IMAGE, PULL_FAILED_IMAGE, IMAGE_CHANGED,
@@ -2368,10 +2480,40 @@ for name in "${CONTAINERS[@]}"; do
   log "  Capturing current run command..."
   run_cmd=$(get_run_command "$name" "$image")
 
-  quadlet_unit=""
-  $SKIP_QUADLET_RESTART || quadlet_unit="$(get_quadlet_unit "$name")"
+  systemd_unit=""
+  systemd_unit_source=""
+  if ! $SKIP_SYSTEMD_RESTART; then
+    if ! $SKIP_MANUAL_UNIT_RESTART; then
+      systemd_unit="$(get_manual_systemd_unit "$name")"
+      [[ -n "$systemd_unit" ]] && systemd_unit_source="manual"
+    fi
+    if [[ -z "$systemd_unit" ]] && ! $SKIP_QUADLET_RESTART; then
+      systemd_unit="$(get_quadlet_unit "$name")"
+      [[ -n "$systemd_unit" ]] && systemd_unit_source="quadlet"
+    fi
+  fi
 
-  if [[ -z "$run_cmd" && -z "$quadlet_unit" ]]; then
+  systemd_unit_scope=""
+  systemd_unit_error=""
+  if [[ -n "$systemd_unit" ]]; then
+    systemd_unit_scope="$(resolve_systemd_scope "$name" "$ENGINE" "$systemd_unit")"
+    case "$systemd_unit_scope" in
+      systemd_unit_scope_mismatch|systemd_unit_not_found|systemd_unit_permission_denied)
+        systemd_unit_error="$systemd_unit_scope"
+        systemd_unit_scope=""
+        ;;
+    esac
+  fi
+
+  if [[ -n "$systemd_unit_error" ]]; then
+    err "  $name: systemd-unit restart cannot proceed ($systemd_unit_error) -" \
+        "leaving the container untouched, no fallback restart attempted."
+    map_set RESULT "$name" "$systemd_unit_error"
+    ATTEMPTED_ORDER+=("$name")
+    continue
+  fi
+
+  if [[ -z "$run_cmd" && -z "$systemd_unit" ]]; then
     err "  Failed to capture run command for $name, skipping to avoid data loss."
     map_set RESULT "$name" reconstruct_failed
     ATTEMPTED_ORDER+=("$name")
@@ -2388,8 +2530,9 @@ for name in "${CONTAINERS[@]}"; do
   fi
 
   if $DRY_RUN; then
-    if [[ -n "$quadlet_unit" ]]; then
-      log "  [dry-run] Would restart $name via Quadlet (systemctl --user restart $quadlet_unit)," \
+    if [[ -n "$systemd_unit" ]]; then
+      log "  [dry-run] Would restart $name via systemd unit '$systemd_unit'" \
+          "(source: $systemd_unit_source, scope: $systemd_unit_scope)," \
           "falling back to $mode mode if that doesn't succeed."
       [[ -n "$run_cmd" ]] && log "    $run_cmd"
     else
@@ -2409,18 +2552,18 @@ for name in "${CONTAINERS[@]}"; do
   new_id="$(map_get NEW_ID_OF_IMAGE "$image")"
   EXTERNAL_RESTART_OUTCOME=""
 
-  quadlet_succeeded=false
-  if [[ -n "$quadlet_unit" ]]; then
-    outcome=$(restart_via_quadlet "$name" "$quadlet_unit" "$new_id")
-    if [[ "$outcome" == "upgraded_via_quadlet" ]]; then
+  systemd_unit_succeeded=false
+  if [[ -n "$systemd_unit" ]]; then
+    outcome=$(restart_via_systemd_unit "$name" "$systemd_unit" "$new_id" "$systemd_unit_scope" "$systemd_unit_source")
+    if [[ "$outcome" == upgraded_via_* ]]; then
       EXTERNAL_RESTART_OUTCOME="$outcome"
-      quadlet_succeeded=true
+      systemd_unit_succeeded=true
     fi
   fi
 
-  if ! $quadlet_succeeded; then
+  if ! $systemd_unit_succeeded; then
     if [[ -z "$run_cmd" ]]; then
-      err "  Failed to capture run command for $name, and the Quadlet restart" \
+      err "  Failed to capture run command for $name, and the systemd-unit restart" \
           "did not succeed either - skipping to avoid data loss."
       map_set RESULT "$name" reconstruct_failed
       continue
@@ -2465,7 +2608,8 @@ for name in "${CONTAINERS[@]}"; do
 
   result="$(map_get RESULT "$name")"
   case "$result" in
-    now_failing|still_failing|reverted_externally|external_config_discrepancy)
+    now_failing|still_failing|reverted_externally|external_config_discrepancy| \
+    systemd_unit_scope_mismatch|systemd_unit_not_found|systemd_unit_permission_denied)
       err "  Final classification for $name: $result" ;;
     *)
       log "  Final classification for $name: $result" ;;
@@ -2520,6 +2664,10 @@ count_upgraded_externally=0
 count_reverted_externally=0
 count_external_config_discrepancy=0
 count_upgraded_via_quadlet=0
+count_upgraded_via_manual_unit=0
+count_systemd_unit_scope_mismatch=0
+count_systemd_unit_not_found=0
+count_systemd_unit_permission_denied=0
 
 # See the VALID_CONTAINERS comment above for why "[@]+...[@]" is needed:
 # ATTEMPTED_ORDER is legitimately empty when every container is already
@@ -2539,6 +2687,10 @@ for name in "${ATTEMPTED_ORDER[@]+"${ATTEMPTED_ORDER[@]}"}"; do
     reverted_externally) count_reverted_externally=$((count_reverted_externally + 1)) ;;
     external_config_discrepancy) count_external_config_discrepancy=$((count_external_config_discrepancy + 1)) ;;
     upgraded_via_quadlet) count_upgraded_via_quadlet=$((count_upgraded_via_quadlet + 1)) ;;
+    upgraded_via_manual_unit) count_upgraded_via_manual_unit=$((count_upgraded_via_manual_unit + 1)) ;;
+    systemd_unit_scope_mismatch) count_systemd_unit_scope_mismatch=$((count_systemd_unit_scope_mismatch + 1)) ;;
+    systemd_unit_not_found) count_systemd_unit_not_found=$((count_systemd_unit_not_found + 1)) ;;
+    systemd_unit_permission_denied) count_systemd_unit_permission_denied=$((count_systemd_unit_permission_denied + 1)) ;;
   esac
 done
 
@@ -2571,7 +2723,14 @@ if [[ $((count_upgraded_externally + count_reverted_externally + count_external_
   fi
 fi
 if [[ $count_upgraded_via_quadlet -gt 0 ]]; then
-  log "Containers upgraded via Quadlet (systemctl --user restart, initiated by this script): $count_upgraded_via_quadlet"
+  log "Containers upgraded via Quadlet (systemctl restart, initiated by this script): $count_upgraded_via_quadlet"
+fi
+if [[ $count_upgraded_via_manual_unit -gt 0 ]]; then
+  log "Containers upgraded via a manual systemd.unit label (systemctl restart, initiated by this script): $count_upgraded_via_manual_unit"
+fi
+if [[ $((count_systemd_unit_scope_mismatch + count_systemd_unit_not_found + count_systemd_unit_permission_denied)) -gt 0 ]]; then
+  err "Containers left untouched - systemd-unit restart could not proceed safely: $((count_systemd_unit_scope_mismatch + count_systemd_unit_not_found + count_systemd_unit_permission_denied))" \
+      "($count_systemd_unit_scope_mismatch scope-mismatch, $count_systemd_unit_not_found unit-not-found, $count_systemd_unit_permission_denied permission-denied)"
 fi
 
 echo ""
@@ -2603,11 +2762,15 @@ status_label() {
     upgraded_externally) echo "Upgraded externally (systemd/Quadlet or another supervisor restarted it)" ;;
     reverted_externally) echo "Restarted externally but reverted to the old image" ;;
     external_config_discrepancy) echo "Restarted externally with a mismatched config" ;;
-    upgraded_via_quadlet) echo "Upgraded via Quadlet (systemctl --user restart, initiated by this script)" ;;
+    upgraded_via_quadlet) echo "Upgraded via Quadlet (systemctl restart, initiated by this script)" ;;
+    upgraded_via_manual_unit) echo "Upgraded via a manual systemd.unit label (systemctl restart, initiated by this script)" ;;
+    systemd_unit_scope_mismatch) echo "Systemd-unit restart not attempted: systemd.scope label mismatch" ;;
+    systemd_unit_not_found) echo "Systemd-unit restart not attempted: unit file not found at resolved scope" ;;
+    systemd_unit_permission_denied) echo "Systemd-unit restart not attempted: system scope requires running as root" ;;
   esac
 }
-STATUS_ORDER=(upgraded restarted rolled_back_working recovered now_failing still_failing pull_failed reconstruct_failed skipped_crashing upgraded_externally reverted_externally external_config_discrepancy upgraded_via_quadlet)
-ERROR_STATUSES=(now_failing still_failing pull_failed reconstruct_failed reverted_externally external_config_discrepancy)
+STATUS_ORDER=(upgraded restarted rolled_back_working recovered now_failing still_failing pull_failed reconstruct_failed skipped_crashing upgraded_externally reverted_externally external_config_discrepancy upgraded_via_quadlet upgraded_via_manual_unit systemd_unit_scope_mismatch systemd_unit_not_found systemd_unit_permission_denied)
+ERROR_STATUSES=(now_failing still_failing pull_failed reconstruct_failed reverted_externally external_config_discrepancy systemd_unit_scope_mismatch systemd_unit_not_found systemd_unit_permission_denied)
 
 is_error_status() {
   local s="$1"
