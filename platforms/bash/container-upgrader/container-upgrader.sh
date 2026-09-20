@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.7-dev2
+# Version: 1.1.7-dev3
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.7 (in progress - currently 1.1.7-dev2) - adds manual systemd-unit-
+#   1.1.7 (in progress - currently 1.1.7-dev3) - adds manual systemd-unit-
 #           managed restart support: a container can now opt into the same
 #           systemctl-based restart Podman Quadlet gets automatically, via a
 #           manual `systemd.unit` label (checked before PODMAN_SYSTEMD_UNIT).
@@ -42,6 +42,13 @@
 #           (normalized_config) was updated the same way so a legitimately
 #           inherited new-image default no longer looks like drift and
 #           triggers a spurious rollback.
+#           Fixed: image-pull failures were logged to a fixed, predictable
+#           /tmp/pull_output.log shared across every user and run, which
+#           could fail outright with "Permission denied" if a prior run
+#           left it owned by another user, and was a symlink-race risk in
+#           world-writable /tmp besides. Each pull now logs to its own
+#           mktemp-generated file, reported by its actual path in the
+#           failure message.
 #   1.1.6 - implements the repo-wide maintenance conventions from
 #           script-maintenance-convention.md (layered --help, CHANGELOG.md,
 #           the numbered-suffix versioning scheme) plus several real bugs
@@ -2479,11 +2486,17 @@ for image in "${UNIQUE_IMAGES[@]}"; do
   done
   log "== Image: $image (used by $n_using container(s)) =="
   log "Pulling..."
-  if ! $ENGINE pull "$image" >/tmp/pull_output.log 2>&1; then
-    err "  Pull failed for $image. Containers using it will be marked pull_failed. See /tmp/pull_output.log"
+  # Unique per-pull temp file rather than a fixed /tmp path: a shared,
+  # predictable name can be left behind by another user/run with
+  # permissions that block us from writing it (Permission denied) and is
+  # a symlink-race risk in a world-writable directory like /tmp.
+  pull_log=$(mktemp 2>/dev/null) || pull_log="/tmp/pull_output.log.$$"
+  if ! $ENGINE pull "$image" >"$pull_log" 2>&1; then
+    err "  Pull failed for $image. Containers using it will be marked pull_failed. See $pull_log"
     map_set PULL_FAILED_IMAGE "$image" true
     continue
   fi
+  rm -f "$pull_log"
   new_id=$($ENGINE image inspect --format '{{.Id}}' "$image" 2>/dev/null)
   map_set NEW_ID_OF_IMAGE "$image" "$new_id"
 

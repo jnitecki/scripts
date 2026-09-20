@@ -12,6 +12,22 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.7-dev3
+Fixes an image-pull failure log that could itself fail with
+`Permission denied`: `docker pull`/`podman pull` output was redirected to a
+fixed, predictable path, `/tmp/pull_output.log`, shared across every user
+and every run of the script on a given host. Whichever user's run created
+that file first ends up owning it (commonly with a restrictive mode), so a
+later run by a different user — or the same user via `sudo` on one run and
+not the next — can fail to open it for writing before the pull is even
+attempted, surfacing as `line 2482: /tmp/pull_output.log: Permission
+denied` instead of an actual pull result. A fixed, world-writable path is
+also a symlink-race risk independent of the permission issue. Each pull now
+logs to its own file from `mktemp` (falling back to a PID-suffixed
+`/tmp/pull_output.log.$$` only if `mktemp` itself is unavailable), removed
+on a successful pull; the failure message reports the real per-run path
+instead of the old hardcoded one.
+
 ## 1.1.7-dev2
 Fixes a bug where an upgraded container's run command could be recreated
 with a stale `--entrypoint` (or `--workdir`/`--env`/`--label`/trailing `cmd`
