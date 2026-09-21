@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 0.0.1-dev6
+# Version: 0.0.1-dev7
 # Category: networking
 # Description: Watches a matching network interface and runs registered add/remove commands as it transitions
 # Upgrade-Source: github.com/jnitecki/scripts@bash/interface-configurator
@@ -16,7 +16,7 @@
 # see script-maintenance-convention.md section 3. A script with no stable
 # release yet (this one) starts that same way, from the section 4
 # bootstrap baseline (0.0.0 -> first real version 0.0.1-dev1):
-#   0.0.1 (in progress - currently 0.0.1-dev6) - initial implementation:
+#   0.0.1 (in progress - currently 0.0.1-dev7) - initial implementation:
 #           --install/--uninstall/--run, shared systemd template unit (a
 #           persistent per-interface watcher, bound to the interface's own
 #           device unit), per-pattern udev rule, add/remove command pairs
@@ -29,6 +29,11 @@
 #           loop's own read) is now guarded the same way, including right
 #           after starting/restarting it - a coprocess that dies before
 #           even that first log line ran was still an unguarded crash.
+#           A self-upgrade trial run (during --install/--uninstall) no
+#           longer bakes its own transient $0 into the systemd unit's
+#           ExecStart - it now inherits the parent's already-correct
+#           resolved path instead, so the unit no longer ends up pointing
+#           at a temp/scratch file the trial run deletes right after.
 #           --add/--remove commands now also get IP4_ADDRESS/IP4_NETMASK/
 #           IP4_PREFIX/IP4_GATEWAY and IP6_ADDRESS/IP6_PREFIX/IP6_GATEWAY
 #           exported alongside IFACE - convenience shortcuts for the
@@ -209,7 +214,25 @@ UPGRADE_BANNER_NOTE=""
 # eligibility checks, same as container-upgrader.sh's own convention).
 # Linux-only per this script's platform carve-out, so GNU `readlink -f` is
 # safe to rely on directly with no BSD fallback needed.
-RESOLVED_SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+#
+# INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH (set/exported by
+# upgrade_main, same handoff idiom as _APPLIED_FROM/_APPLIED_MODE below)
+# overrides the `readlink -f "$0"` fallback - a real production bug found
+# via --install auto-upgrading itself mid-run: upgrade_main's trial run
+# hands off to a *candidate* process whose own "$0" is a transient path
+# (a temp sibling file, a scratch file, or the upgrade cache, depending on
+# mode) rather than this script's real, enduring location. Without this
+# override, that trial run's own --install baked its own transient $0
+# into the systemd unit's ExecStart, which then pointed at a file deleted
+# the moment the trial run finished persisting - `link` mode is the one
+# exception (there the trial's own cache-file $0 *is* the enduring
+# location, so upgrade_main deliberately leaves it unset for that mode).
+if [ -n "${INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH:-}" ]; then
+  RESOLVED_SCRIPT_PATH="$INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH"
+  unset INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH
+else
+  RESOLVED_SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
 err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
@@ -1428,7 +1451,7 @@ upgrade_main() {
         return 0
       fi
       chmod +x "$tmp" 2>/dev/null
-      "$tmp" "$@"; local code=$?
+      INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH="$RESOLVED_SCRIPT_PATH" "$tmp" "$@"; local code=$?
       if [ "$code" -eq 0 ]; then
         if ! upgrade_verify_disk_hash "$tmp" "$tag_hash"; then
           rm -f "$tmp"
@@ -1445,7 +1468,7 @@ upgrade_main() {
     overwrite)
       local scratch=""
       if [ -n "$cache_source" ]; then
-        bash "$cache_source" "$@"; local code=$?
+        INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH="$RESOLVED_SCRIPT_PATH" bash "$cache_source" "$@"; local code=$?
       else
         scratch=$(upgrade_write_temp_scratch "$content")
         if [ -z "$scratch" ]; then
@@ -1453,7 +1476,7 @@ upgrade_main() {
           UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
           return 0
         fi
-        bash "$scratch" "$@"; local code=$?
+        INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH="$RESOLVED_SCRIPT_PATH" bash "$scratch" "$@"; local code=$?
       fi
       if [ "$code" -eq 0 ]; then
         if [ -n "$cache_source" ]; then
@@ -1505,7 +1528,7 @@ upgrade_main() {
         UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
         return 0
       fi
-      bash "$scratch" "$@"; local code=$?
+      INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH="$RESOLVED_SCRIPT_PATH" bash "$scratch" "$@"; local code=$?
       rm -f "$scratch"
       exit "$code"
       ;;

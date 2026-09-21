@@ -9,6 +9,33 @@ folded into one running "in progress" entry there instead. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 0.0.1-dev7
+Fixes a production crash-loop caused by a *previous* `--install` run,
+unrelated to `0.0.1-dev6`'s fix: `upgrade_main`'s self-upgrade trial run
+(`replacement`/`overwrite`/`memory` modes) hands off to a candidate
+process whose own `$0` is a transient path (a `mktemp
+"${script_path}.XXXXXX"` sibling, a scratch file, or the upgrade cache),
+not this script's real, enduring location. Since `--install`/
+`--uninstall` are the only call sites that ever run `upgrade_main`, a
+trial run that happens to itself be an `--install` had its own
+`ensure_shared_unit` bake *that transient path* into the generated
+systemd unit's `ExecStart` - a path that's renamed/deleted moments later
+once the trial succeeds and the real replacement is persisted. The unit
+was then left permanently pointing at a filename that no longer exists,
+surfacing later as systemd's `Failed to locate executable ...: No such
+file or directory` (status 203/EXEC) on every subsequent interface event,
+with no relation to anything `--run` itself does - the corruption already
+happened at `--install` time. Fixed by having `upgrade_main` pass its own
+already-correct `RESOLVED_SCRIPT_PATH` through to each trial-run
+candidate (`INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH`, the same
+handoff idiom as `_APPLIED_FROM`/`_APPLIED_MODE`) instead of letting it
+recompute a wrong one from its own transient `$0` - except for `link`
+mode, where that transient path genuinely is the enduring one. This only
+prevents *future* corruption; a host already hit by this needs one more
+`--install` run (any pattern) once the fixed script is in place, to let
+`ensure_shared_unit`'s existing content-drift check rewrite the unit with
+the correct `ExecStart`.
+
 ## 0.0.1-dev6
 The `0.0.1-dev2` coprocess-death guard only covered the watch loop's own
 `read -u "${IC_MON[0]}"` - it missed two other unguarded references to

@@ -136,6 +136,40 @@ Linux-only) is baked into the generated unit's `ExecStart` literally,
 separate from `SCRIPT_PATH` (`"$0"` as invoked, used only by the
 self-upgrade block's own filesystem-eligibility checks).
 
+**Corrupted by a self-upgrade trial run - a real production bug.**
+`upgrade_main`'s trial run (`replacement`/`overwrite`/`memory` modes)
+hands off to a candidate process whose own `"$0"` is a transient path (a
+`mktemp "${script_path}.XXXXXX"` sibling, a scratch file, or the upgrade
+cache) rather than this script's real, enduring location. If that trial
+run is itself an `--install` (the normal case - `--install`/`--uninstall`
+are the only call sites `upgrade_main` runs from, per "Where self-upgrade
+is skipped" above), its own `ensure_shared_unit` baked *its own* `$0`
+into the unit's `ExecStart` - a path that gets renamed/deleted moments
+later once the trial succeeds and `upgrade_main` persists the real
+replacement. The unit was then left permanently pointing at a filename
+that no longer exists, surfacing on the next interface event as
+systemd's `Failed to locate executable ...: No such file or directory`
+(status 203/EXEC) - not a script bug `--run` itself could ever hit or
+guard against, since the corruption already happened by the time `--run`
+starts. Fixed by having `RESOLVED_SCRIPT_PATH`'s computation check for
+`INTERFACE_CONFIGURATOR_UPGRADE_TRIAL_SCRIPT_PATH` first (set/exported by
+`upgrade_main` right before each trial-run handoff, same idiom as
+`_APPLIED_FROM`/`_APPLIED_MODE`) before falling back to `readlink -f
+"$0"` - the parent's own already-correct `RESOLVED_SCRIPT_PATH` is passed
+through instead of letting the trial candidate recompute a wrong one from
+its own transient `$0`. `link` mode is the deliberate exception: its
+trial candidate's `$0` (the upgrade cache file) *is* the enduring
+location that mode keeps running from afterward, so `upgrade_main` leaves
+the override unset there.
+
+**Recovery on an already-affected host.** This only fixes *future*
+self-upgrades - it does nothing for a unit file already corrupted by a
+prior one. Since `ensure_shared_unit` rewrites the unit (and
+`daemon-reload`s) on any content mismatch on every `--install`, simply
+running `--install` again (any pattern - even re-registering one already
+registered) once the fixed script is in place regenerates the unit with
+the correct `ExecStart` and clears the failure.
+
 ## Per-pattern udev rule
 
 `udev_rule_content()`: `ACTION=="add"` only - the only event confirmed
