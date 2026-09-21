@@ -62,13 +62,52 @@ something you run by hand.
 syntax both `udev` and this script's own matching already use, so one
 pattern string works unmodified everywhere. Each `--add`/`--remove` is a
 single shell command string, with the matched interface name available as
-both `$IFACE` and `$1`:
+both `$IFACE` and `$1`, plus the convenience variables below:
 
 ```
 sudo ./interface-configurator.sh --install 'eth*' \
   --add    'ip route replace 10.0.0.0/24 via 10.0.0.1 dev "$IFACE"' \
   --remove 'ip route del 10.0.0.0/24 dev "$IFACE"'
 ```
+
+### Convenience variables
+
+Besides `$IFACE`/`$1`, every `--add`/`--remove` command also gets these
+exported:
+
+| Variable | Value |
+| --- | --- |
+| `IP4_ADDRESS` | The interface's first global-scope IPv4 address (no prefix), e.g. `192.168.1.5` |
+| `IP4_NETMASK` | That address's netmask in dotted form, e.g. `255.255.255.0` |
+| `IP4_PREFIX` | That address's prefix length, e.g. `24` |
+| `IP4_GATEWAY` | The gateway of the interface's own IPv4 default route |
+| `IP6_ADDRESS` | The interface's first global-scope IPv6 address (no prefix) |
+| `IP6_PREFIX` | That address's prefix length |
+| `IP6_GATEWAY` | The gateway of the interface's own IPv6 default route |
+
+**These are shortcuts for the simple, single-address/default-route case
+only** — empty if the interface has none in that family. An interface
+with more than one address in a family only ever gets the first one here;
+IPv4 and IPv6 gateways are independent (a dual-stack interface can have
+different, or only one, default route per family), and there's no
+`IP6_NETMASK` — IPv6 addresses aren't conventionally expressed with a
+dotted-style mask, only the prefix length already in `IP6_PREFIX`.
+Anything beyond this — a second address, a non-default route, an
+interface's own subnet number rather than a single host address — needs
+its own `ip` query inside the command, e.g. `ip -4 -o addr show dev
+"$IFACE"` or `ip route show dev "$IFACE"`.
+
+An `--add` command gets these queried live (the interface is known-ready
+at that point), and the script itself stashes the values under
+`/run/interface-configurator/<iface>.env` right after. A `--remove`
+command gets them from that stash instead of a fresh `ip` query, so
+they're still correct even once the interface — and whatever
+address/gateway it had — is already gone by the time `--remove` runs
+(its own removal is one of the triggers for running remove commands; see
+the table below). You don't need to capture anything yourself for this to
+work. The stash is deleted once the watcher for that interface is done
+for good, and is per-interface, not per-pattern (every pattern watching
+the same interface sees the same stashed values).
 
 ## How a rule behaves over an interface's lifetime
 

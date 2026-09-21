@@ -133,17 +133,26 @@ interface-configurator --install 'eth*' \
 
 ### 4. Storage: pattern → add/remove command lists
 `/etc/interface-configurator/rules.d/<slug>.conf`, one file per registered
-pattern, containing safely-quoted bash assignments (written with
-`printf '%s=%q\n'`, sourced back with `.`/`source` rather than parsed by
-hand): `PATTERN`, `ADD_COUNT` plus indexed `ADD_1`..`ADD_<n>`, and
-`REMOVE_COUNT` plus indexed `REMOVE_1`..`REMOVE_<m>`:
+pattern, plain-text `KEY=value` lines, one per line, each value written
+and read back **unescaped** (everything after the line's first `=`,
+verbatim): one `PATTERN=<pattern>`, then one `ADD=<command>` per add
+command and one `REMOVE=<command>` per remove command, in order - no
+index/count bookkeeping, `read_rule_config` collects every
+`ADD=`/`REMOVE=` line it finds:
 ```
-PATTERN=eth\*
-ADD_COUNT=1
-ADD_1=ip\ route\ replace\ 10.0.0.0/24\ via\ 10.0.0.1\ dev\ \"\$IFACE\"
-REMOVE_COUNT=1
-REMOVE_1=ip\ route\ del\ 10.0.0.0/24\ dev\ \"\$IFACE\"
+PATTERN=eth*
+ADD=ip route replace 10.0.0.0/24 via 10.0.0.1 dev "$IFACE"
+REMOVE=ip route del 10.0.0.0/24 dev "$IFACE"
 ```
+The `REMOVE` key deliberately matches the `--remove` CLI flag name, so
+the file reads naturally against the command that produced it. The file
+is read back by splitting each line on its first
+`=` (`IFS='=' read`), never sourced as bash - it's always plain data, not
+executable code, and no value needs escaping since nothing in it is ever
+evaluated as shell syntax. The one string this can't represent is one
+containing a literal embedded newline (it would split across lines);
+`--install <pattern>`/`--add <command>`/`--remove <command>` reject that
+upfront with a clear error rather than let it reach this file.
 
 `<slug>` is derived from the pattern so it's a safe filename: non-
 `[A-Za-z0-9_-]` characters replaced with `_`, then `-` plus the first 8 hex

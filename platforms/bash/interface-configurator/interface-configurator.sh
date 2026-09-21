@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 0.0.1-dev1
+# Version: 0.0.1-dev5
 # Category: networking
 # Description: Watches a matching network interface and runs registered add/remove commands as it transitions
 # Upgrade-Source: github.com/jnitecki/scripts@bash/interface-configurator
@@ -16,12 +16,24 @@
 # see script-maintenance-convention.md section 3. A script with no stable
 # release yet (this one) starts that same way, from the section 4
 # bootstrap baseline (0.0.0 -> first real version 0.0.1-dev1):
-#   0.0.1 (in progress - currently 0.0.1-dev1) - initial implementation:
+#   0.0.1 (in progress - currently 0.0.1-dev5) - initial implementation:
 #           --install/--uninstall/--run, shared systemd template unit (a
 #           persistent per-interface watcher, bound to the interface's own
 #           device unit), per-pattern udev rule, add/remove command pairs
 #           applied across the interface's whole lifecycle (up, down,
-#           address change, removal), self-upgrade.
+#           address change, removal), self-upgrade. watch_iface's ip
+#           monitor coprocess no longer crashes the watcher on an unbound
+#           variable if it exits unexpectedly - it's now detected, logged,
+#           and restarted (bounded), and its stderr is no longer discarded.
+#           --add/--remove commands now also get IP4_ADDRESS/IP4_NETMASK/
+#           IP4_PREFIX/IP4_GATEWAY and IP6_ADDRESS/IP6_PREFIX/IP6_GATEWAY
+#           exported alongside IFACE - convenience shortcuts for the
+#           single-address/default-route-only case. An add command's
+#           values are stashed under /run so a later remove command still
+#           sees them even once the interface itself is gone. The
+#           per-pattern rule config file is now plain-text (one PATTERN=/
+#           ADD=/REMOVE= per line, unescaped, no _<n>/*_COUNT bookkeeping)
+#           read by simple line parsing rather than sourced as bash.
 # HELP:IDENTITY:END
 #
 # HELP:INTRO:BEGIN
@@ -162,6 +174,7 @@ set -uo pipefail
 : "${IC_SYSTEMD_DIR:=/etc/systemd/system}"
 : "${IC_UDEV_RULES_DIR:=/etc/udev/rules.d}"
 : "${IC_RULES_DIR:=/etc/interface-configurator/rules.d}"
+: "${IC_STATE_DIR:=/run/interface-configurator}"
 : "${IC_SYS_CLASS_NET:=/sys/class/net}"
 : "${IC_READY_TIMEOUT_SECONDS:=300}"
 
@@ -222,6 +235,23 @@ require_root() {
   fi
 }
 
+# args: $1=value $2=label for the error message -> exits 1 if $1 contains
+# an embedded newline. The rule config file (write_rule_config/
+# read_rule_config) stores the pattern and each add/remove command as one
+# value per line; a literal newline inside a value would split it across
+# two lines and corrupt that structure. Called on every --install
+# <pattern>/--add <command>/--remove <command> as they're parsed, so this
+# is rejected up front with a clear error rather than silently corrupting
+# a config file (or being silently misread back) later.
+reject_newline() {
+  case "$1" in
+    *$'\n'*)
+      err "Error: ${2} may not contain a newline"
+      exit 1
+      ;;
+  esac
+}
+
 # =============================================================================
 # Pattern slug
 # =============================================================================
@@ -264,52 +294,69 @@ rule_config_path() {
 
 # args: $1=pattern $2=name of the add-commands array $3=name of the
 # remove-commands array -> writes/overwrites that pattern's config file as
-# PATTERN plus indexed ADD_<n>/REMOVE_<n> assignments (ADD_COUNT/
-# REMOVE_COUNT record how many). %q-quoted per entry so the file can be
-# safely sourced back rather than parsed by hand, and so a pattern/command
-# containing shell-special characters (e.g. 'eth*') isn't glob-expanded or
-# word-split when the assignments are later sourced.
+# plain-text `KEY=value` lines: one `PATTERN=`, then one `ADD=` per add
+# command and one `REMOVE=` per remove command, in order - no `_<n>`
+# index suffix or `*_COUNT` line; read_rule_config collects every
+# `ADD=`/`REMOVE=` line it finds, in file order, so the count falls out
+# of "however many lines there are" rather than being tracked separately.
+# `REMOVE` (not e.g. `DEL`) deliberately matches the `--remove` CLI flag
+# name - this file is meant to stay readable by a human comparing it
+# against the command that produced it.
+#
+# Values are written literally (no quoting/escaping) - each is everything
+# after the first `=` on its line, unparsed, so it reproduces the
+# original pattern/command string exactly including embedded spaces,
+# quotes, `$IFACE`, `*`, etc.; read_rule_config reads it back the same
+# way, by field-splitting on `=` rather than sourcing the file as bash
+# (which is also why this format needs no escaping in the first place -
+# nothing here is ever evaluated as shell syntax). The one thing this
+# can't represent is a literal embedded newline inside a value, since
+# that would split it across two lines - the CLI's --install/--add/
+# --remove parsing rejects that upfront (reject_newline), so it can never
+# reach this file.
 write_rule_config() {
   local pattern="$1"
   local -n adds_ref="$2"
   local -n removes_ref="$3"
-  local path i
+  local path cmd
   path=$(rule_config_path "$pattern")
   mkdir -p "$IC_RULES_DIR" 2>/dev/null || { err "Error: cannot create ${IC_RULES_DIR}"; exit 1; }
   {
-    printf 'PATTERN=%q\n' "$pattern"
-    printf 'ADD_COUNT=%d\n' "${#adds_ref[@]}"
-    for i in "${!adds_ref[@]}"; do
-      printf 'ADD_%d=%q\n' "$((i + 1))" "${adds_ref[$i]}"
+    printf 'PATTERN=%s\n' "$pattern"
+    for cmd in "${adds_ref[@]}"; do
+      printf 'ADD=%s\n' "$cmd"
     done
-    printf 'REMOVE_COUNT=%d\n' "${#removes_ref[@]}"
-    for i in "${!removes_ref[@]}"; do
-      printf 'REMOVE_%d=%q\n' "$((i + 1))" "${removes_ref[$i]}"
+    for cmd in "${removes_ref[@]}"; do
+      printf 'REMOVE=%s\n' "$cmd"
     done
   } > "$path" || { err "Error: cannot write ${path}"; exit 1; }
 }
 
 # args: $1=config file path -> sets PATTERN/ADD_CMDS/REMOVE_CMDS in the
-# caller's scope by sourcing it (cleared first, so a malformed file can't
-# leak a previous iteration's values under `set -u`) and expanding the
-# indexed ADD_<n>/REMOVE_<n> assignments it sets into the two arrays.
+# caller's scope (cleared first, so a malformed file can't leak a
+# previous iteration's values under `set -u`) by reading it line by line -
+# never sourced as bash, so this file is always plain data, not
+# executable code. `IFS='=' read -r key value` splits only on the first
+# `=` (a `read` with more input fields than target variables dumps
+# everything past the last split point, `=` characters included, into the
+# final variable un-split), and performs no expansion/word-splitting of
+# its own, so `value` comes back byte-for-byte identical to what
+# write_rule_config wrote - unknown/malformed lines are silently ignored,
+# forward-compatible with a config file written by a newer script
+# version that adds a key this version doesn't know about.
 read_rule_config() {
-  local file="$1" i var
+  local file="$1" key value
   PATTERN=""
-  ADD_COUNT=0
-  REMOVE_COUNT=0
   ADD_CMDS=()
   REMOVE_CMDS=()
-  # shellcheck disable=SC1090
-  . "$file"
-  for ((i = 1; i <= ADD_COUNT; i++)); do
-    var="ADD_${i}"
-    ADD_CMDS+=("${!var}")
-  done
-  for ((i = 1; i <= REMOVE_COUNT; i++)); do
-    var="REMOVE_${i}"
-    REMOVE_CMDS+=("${!var}")
-  done
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    case "$key" in
+      PATTERN) PATTERN="$value" ;;
+      ADD)     ADD_CMDS+=("$value") ;;
+      REMOVE)  REMOVE_CMDS+=("$value") ;;
+      *)       ;;
+    esac
+  done < "$file"
 }
 
 # =============================================================================
@@ -412,7 +459,7 @@ iface_is_ready() {
 wait_for_ready() {
   local iface="$1" secs="$2"
   iface_is_ready "$iface" && return 0
-  timeout "$secs" ip monitor link dev "$iface" 2>/dev/null | while IFS= read -r _; do
+  timeout "$secs" ip monitor link dev "$iface" | while IFS= read -r _; do
     iface_is_ready "$iface" && break
   done
   iface_is_ready "$iface"
@@ -440,13 +487,143 @@ list_interfaces() {
   done
 }
 
-# args: $1=interface name $2=command string -> runs it with IFACE exported
-# and the interface name also passed as $1, logs its exit status, and
-# returns that same status.
+# args: $1=prefix length (0-32) -> dotted IPv4 netmask, e.g. 24 ->
+# 255.255.255.0. Relies on bash's 64-bit arithmetic: shifting the 32-bit
+# all-ones mask left by (32 - prefix) - including the /0 edge case, which
+# shifts it out of the low 32 bits entirely - always lands in the low 32
+# bits with the correct value once masked back down with 0xffffffff.
+ipv4_prefix_to_netmask() {
+  local prefix="$1" mask
+  mask=$(( (0xffffffff << (32 - prefix)) & 0xffffffff ))
+  printf '%d.%d.%d.%d' $(( (mask >> 24) & 255 )) $(( (mask >> 16) & 255 )) \
+    $(( (mask >> 8) & 255 )) $(( mask & 255 ))
+}
+
+# args: $1=interface name -> sets IP4_ADDRESS/IP4_NETMASK/IP4_PREFIX and
+# IP6_ADDRESS/IP6_PREFIX (empty if the interface has none in that family)
+# for run_command_for_iface to export - convenience shortcuts for the
+# simple case (README "Convenience variables"): only the interface's
+# first global-scope address in each family. An interface with more than
+# one address in a family only ever gets the first one here; a
+# --add/--remove command needing more queries `ip` itself. No IP6_NETMASK
+# - IPv6 addresses aren't conventionally expressed with a dotted-style
+# mask, only the prefix length already in IP6_PREFIX.
+set_iface_address_vars() {
+  local iface="$1" line cidr
+  IP4_ADDRESS=""; IP4_NETMASK=""; IP4_PREFIX=""
+  IP6_ADDRESS=""; IP6_PREFIX=""
+
+  line="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | head -n1)"
+  if [ -n "$line" ]; then
+    cidr="$(printf '%s' "$line" | awk '{print $4}')"
+    IP4_ADDRESS="${cidr%%/*}"
+    IP4_PREFIX="${cidr##*/}"
+    IP4_NETMASK="$(ipv4_prefix_to_netmask "$IP4_PREFIX")"
+  fi
+
+  line="$(ip -6 -o addr show dev "$iface" scope global 2>/dev/null | head -n1)"
+  if [ -n "$line" ]; then
+    cidr="$(printf '%s' "$line" | awk '{print $4}')"
+    IP6_ADDRESS="${cidr%%/*}"
+    IP6_PREFIX="${cidr##*/}"
+  fi
+}
+
+# args: $1=interface name -> sets IP4_GATEWAY/IP6_GATEWAY (empty if none)
+# for run_command_for_iface to export: the gateway of this interface's own
+# default route in each family. Independent per family - a dual-stack
+# interface can have different IPv4/IPv6 default routes, or only one of
+# the two.
+set_iface_gateway_vars() {
+  local iface="$1"
+  IP4_GATEWAY="$(ip -4 route show default dev "$iface" 2>/dev/null \
+    | awk '{for (i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}')"
+  IP6_GATEWAY="$(ip -6 route show default dev "$iface" 2>/dev/null \
+    | awk '{for (i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}')"
+}
+
+# args: $1=interface name -> path to that interface's stashed convenience
+# variables (see write_iface_state/read_iface_state below). One file per
+# interface, not per pattern - the address/gateway they hold are a
+# property of the interface itself, shared by every pattern watching it.
+iface_state_path() {
+  printf '%s/%s.env' "$IC_STATE_DIR" "$1"
+}
+
+# args: $1=interface name -> writes the current IP4_*/IP6_* globals (as
+# already set by set_iface_address_vars/set_iface_gateway_vars) to that
+# interface's state file under IC_STATE_DIR (/run by default - cleared on
+# reboot, which is correct: stale state from a previous boot is never
+# valid). Called right after an add command runs, while the interface is
+# known-ready, so a later remove command can recover these values even
+# once the interface itself is gone (see read_iface_state). Best-effort:
+# IC_STATE_DIR may not be writable (e.g. --run invoked by hand as a
+# non-root user for testing) - logged, not fatal, since this only affects
+# the convenience variables, never the add/remove commands themselves.
+write_iface_state() {
+  local iface="$1" path
+  path="$(iface_state_path "$iface")"
+  mkdir -p "$IC_STATE_DIR" 2>/dev/null || { err "Warning: cannot create ${IC_STATE_DIR} - remove commands for '${iface}' won't see a stashed address/gateway if it's since disappeared"; return 0; }
+  {
+    printf 'IP4_ADDRESS=%q\n' "$IP4_ADDRESS"
+    printf 'IP4_NETMASK=%q\n' "$IP4_NETMASK"
+    printf 'IP4_PREFIX=%q\n' "$IP4_PREFIX"
+    printf 'IP4_GATEWAY=%q\n' "$IP4_GATEWAY"
+    printf 'IP6_ADDRESS=%q\n' "$IP6_ADDRESS"
+    printf 'IP6_PREFIX=%q\n' "$IP6_PREFIX"
+    printf 'IP6_GATEWAY=%q\n' "$IP6_GATEWAY"
+  } > "$path" || err "Warning: cannot write ${path} - remove commands for '${iface}' won't see a stashed address/gateway if it's since disappeared"
+}
+
+# args: $1=interface name -> sets the IP4_*/IP6_* globals from that
+# interface's stashed state file if one exists, else leaves them empty
+# (never unset, so this script's `set -u` is never tripped by a lookup
+# that finds nothing).
+read_iface_state() {
+  local iface="$1" path
+  path="$(iface_state_path "$iface")"
+  IP4_ADDRESS=""; IP4_NETMASK=""; IP4_PREFIX=""; IP4_GATEWAY=""
+  IP6_ADDRESS=""; IP6_PREFIX=""; IP6_GATEWAY=""
+  [ -f "$path" ] && . "$path"
+}
+
+# args: $1=interface name -> removes that interface's stashed state file,
+# if any. Called once the watcher for this interface is done for good
+# (watch_iface's own exit) - a stash from an interface that's gone is
+# never valid for a future one that happens to get the same name later.
+remove_iface_state() {
+  rm -f "$(iface_state_path "$1")" 2>/dev/null || true
+}
+
+# args: $1=interface name $2=command string $3=kind ("add"|"remove") ->
+# runs it with IFACE, plus the IP4_*/IP6_* convenience variables above,
+# exported, and the interface name also passed as $1, logs its exit
+# status, and returns that same status.
+#
+# "add" queries the variables live (the interface is known-ready at this
+# point) and stashes them via write_iface_state for a later "remove" to
+# recover - "remove" reads that same stash instead of querying live,
+# since by the time a remove command runs - especially one triggered by
+# the interface's own removal (see watch_iface's loop condition) - the
+# interface, and whatever address/gateway it had, may already be gone.
+# This also keeps add and remove seeing the *same* values for a given
+# lifecycle transition, rather than remove picking up whatever's live at
+# that moment (e.g. a since-renewed DHCP lease) if the interface happens
+# to still be there.
 run_command_for_iface() {
-  local iface="$1" command="$2" code
+  local iface="$1" command="$2" kind="$3" code
+  if [ "$kind" = "add" ]; then
+    set_iface_address_vars "$iface"
+    set_iface_gateway_vars "$iface"
+    write_iface_state "$iface"
+  else
+    read_iface_state "$iface"
+  fi
   log "running command for '${iface}': ${command}"
-  IFACE="$iface" bash -c "$command" "$SCRIPT_NAME" "$iface"
+  IFACE="$iface" \
+    IP4_ADDRESS="$IP4_ADDRESS" IP4_NETMASK="$IP4_NETMASK" IP4_PREFIX="$IP4_PREFIX" IP4_GATEWAY="$IP4_GATEWAY" \
+    IP6_ADDRESS="$IP6_ADDRESS" IP6_PREFIX="$IP6_PREFIX" IP6_GATEWAY="$IP6_GATEWAY" \
+    bash -c "$command" "$SCRIPT_NAME" "$iface"
   code=$?
   if [ "$code" -eq 0 ]; then
     log "command for '${iface}' exited 0"
@@ -492,11 +669,11 @@ run_matched() {
     [[ "$iface" == $PATTERN ]] || continue
     if [ "$kind" = "add" ]; then
       for cmd in "${ADD_CMDS[@]}"; do
-        run_command_for_iface "$iface" "$cmd" || true
+        run_command_for_iface "$iface" "$cmd" "add" || true
       done
     else
       for cmd in "${REMOVE_CMDS[@]}"; do
-        run_command_for_iface "$iface" "$cmd" || true
+        run_command_for_iface "$iface" "$cmd" "remove" || true
       done
     fi
   done
@@ -520,7 +697,7 @@ run_matched() {
 # already down when this process stops never gets its remove commands run
 # twice.
 watch_iface() {
-  local iface="$1" terminate=0 ready=1 addrs last_addrs line
+  local iface="$1" terminate=0 ready=1 addrs last_addrs line mon_failures=0
   trap 'terminate=1' TERM INT
 
   last_addrs=$(get_addresses "$iface")
@@ -528,12 +705,34 @@ watch_iface() {
   # Passive, event-driven watch via a coprocess (not a sleep/poll loop) -
   # `read -t 1` bounds how long each loop iteration blocks so the
   # TERM/INT trap above gets a chance to run promptly (within ~1s) even
-  # while nothing on the interface is changing.
-  coproc IC_MON ip monitor link addr dev "$iface" 2>/dev/null
+  # while nothing on the interface is changing. Its stderr is left
+  # attached to this process's own stderr (the systemd journal), not
+  # discarded, so a real `ip monitor` failure is visible instead of
+  # vanishing silently.
+  coproc IC_MON ip monitor link addr dev "$iface"
+  log "watching '${iface}' via ip monitor (pid ${IC_MON_PID})"
 
   while [ "$terminate" -eq 0 ] && [ -e "${IC_SYS_CLASS_NET}/${iface}" ]; do
     line=""
-    read -t 1 -r -u "${IC_MON[0]}" line 2>/dev/null
+    if [ -n "${IC_MON_PID:-}" ]; then
+      read -t 1 -r -u "${IC_MON[0]}" line 2>/dev/null
+    else
+      # bash unsets IC_MON/IC_MON_PID the instant the coprocess exits -
+      # without this check, the read above would crash on an unbound
+      # variable under `set -u` instead of failing visibly (this is what
+      # used to happen here). Restart it, bounded, so a coprocess that
+      # can't stay up doesn't spin this loop forever; exhausting the bound
+      # hands off to systemd's own Restart=on-failure instead.
+      mon_failures=$((mon_failures + 1))
+      err "ip monitor coprocess for '${iface}' exited unexpectedly (attempt ${mon_failures}/5)"
+      if [ "$mon_failures" -ge 5 ]; then
+        err "ip monitor coprocess for '${iface}' won't stay up - giving up"
+        exit 1
+      fi
+      sleep 1
+      coproc IC_MON ip monitor link addr dev "$iface"
+      log "restarted ip monitor coprocess for '${iface}' (pid ${IC_MON_PID})"
+    fi
 
     if iface_is_ready "$iface"; then
       if [ "$ready" -eq 0 ]; then
@@ -559,12 +758,13 @@ watch_iface() {
     fi
   done
 
-  kill "$IC_MON_PID" 2>/dev/null
-  wait "$IC_MON_PID" 2>/dev/null
+  kill "${IC_MON_PID:-}" 2>/dev/null
+  wait "${IC_MON_PID:-}" 2>/dev/null
 
   if [ "$ready" -eq 1 ]; then
     run_matched "$iface" remove
   fi
+  remove_iface_state "$iface"
   log "stopped watching '${iface}'"
   exit 0
 }
@@ -610,7 +810,7 @@ apply_now_for_pattern() {
     if systemctl is-active --quiet "$unit"; then
       if wait_for_ready "$iface" "$IC_READY_TIMEOUT_SECONDS"; then
         for cmd in "${adds_ref[@]}"; do
-          run_command_for_iface "$iface" "$cmd" || true
+          run_command_for_iface "$iface" "$cmd" "add" || true
         done
       else
         err "interface '${iface}' did not become ready within ${IC_READY_TIMEOUT_SECONDS}s - skipping immediate apply"
@@ -1402,6 +1602,7 @@ while [ $# -gt 0 ]; do
         err "Error: --install requires <interface_pattern>"
         exit 1
       fi
+      reject_newline "$INSTALL_PATTERN" "--install <interface_pattern>"
       MODE="install"
       shift 2
       while [ $# -gt 0 ]; do
@@ -1411,6 +1612,7 @@ while [ $# -gt 0 ]; do
               err "Error: --add requires a command"
               exit 1
             fi
+            reject_newline "$2" "--add <command>"
             ADD_COMMANDS+=("$2")
             shift 2
             ;;
@@ -1419,6 +1621,7 @@ while [ $# -gt 0 ]; do
               err "Error: --remove requires a command"
               exit 1
             fi
+            reject_newline "$2" "--remove <command>"
             REMOVE_COMMANDS+=("$2")
             shift 2
             ;;

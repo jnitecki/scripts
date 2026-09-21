@@ -69,7 +69,7 @@ variable" error deep inside `watch_iface`'s body). Since `watch_iface`
 only ever needs to background a single simple command (`ip monitor ...`),
 the fix was to drop the brace group entirely and use the plain
 `coproc NAME simple-command` form instead - `coproc IC_MON ip monitor
-link addr dev "$iface" 2>/dev/null`. This form fails cleanly and
+link addr dev "$iface"`. This form fails cleanly and
 locally on bash 3.2 (`coproc: command not found`, since 3.2 doesn't
 recognize the keyword and tries to run it as a literal command) without
 corrupting anything else, and it's simpler than the brace-group form
@@ -89,14 +89,35 @@ the slug directly from the pattern argument.
 
 `write_rule_config()` takes the pattern plus the *names* of two bash
 arrays (not the arrays themselves - see the nameref note above) and
-writes `PATTERN`, `ADD_COUNT` + indexed `ADD_<n>`, `REMOVE_COUNT` +
-indexed `REMOVE_<n>`, each `%q`-quoted. `read_rule_config()` sources the
-file back (clearing `PATTERN`/`ADD_COUNT`/`REMOVE_COUNT`/`ADD_CMDS`/
-`REMOVE_CMDS` first, since the script runs under `set -u`) and expands
-the indexed assignments into `ADD_CMDS`/`REMOVE_CMDS` arrays via indirect
-parameter expansion (`${!var}`, plain bash, no nameref needed for reading
-- only the *writing* side needed namerefs, to accept the caller's array
-by name).
+writes plain-text `KEY=value` lines: one `PATTERN=<pattern>`, then one
+`ADD=<command>` per add command and one `REMOVE=<command>` per remove
+command, in order - no index suffix or count line. The `REMOVE` key
+deliberately matches the `--remove` CLI flag name, so the file reads
+naturally against the command that produced it. Values are written
+**unescaped** - `printf 'ADD=%s\n' "$cmd"`, not `%q` - since nothing
+reads this file back as shell syntax (see next paragraph), there's
+nothing that needs escaping.
+
+`read_rule_config()` reads the file back line by line (clearing
+`PATTERN`/`ADD_CMDS`/`REMOVE_CMDS` first, since the script runs under
+`set -u`) rather than sourcing it - `while IFS='=' read -r key value`,
+splitting each line only on its *first* `=` (`read` with more input
+fields than target variables dumps everything past the last split point
+into the final variable, `=` characters included, so a value containing
+its own `=` round-trips intact), and appends to `ADD_CMDS`/`REMOVE_CMDS`
+on every `ADD=`/`REMOVE=` line rather than counting up to a recorded
+total - an unrecognized line (or one from an older/newer format) is
+silently ignored rather than erroring. Not sourcing the file also means
+it's always plain data, never executable code, regardless of what a
+value contains.
+
+The one string this format can't represent is one containing a literal
+embedded newline (it would split across two lines and corrupt the
+structure). Rather than let that silently corrupt a config file or be
+silently misread back, `reject_newline()` checks `--install <pattern>`/
+`--add <command>`/`--remove <command>` as they're parsed and exits 1 with
+a clear error if any of them contains one - so a value reaching
+`write_rule_config` is already guaranteed newline-free.
 
 ## Shared systemd template unit
 
@@ -137,25 +158,38 @@ end.
 `watch_iface()`:
 - `trap 'terminate=1' TERM INT` - sets a flag the loop condition checks,
   rather than trying to interrupt work mid-command.
-- `coproc IC_MON ip monitor link addr dev "$iface" 2>/dev/null` -
-  backgrounds the monitor process; `${IC_MON[0]}` is its readable fd,
-  `$IC_MON_PID` its PID (used to `kill`/`wait` it before the function
-  returns).
+- `coproc IC_MON ip monitor link addr dev "$iface"` - backgrounds the
+  monitor process; `${IC_MON[0]}` is its readable fd, `$IC_MON_PID` its
+  PID (used to `kill`/`wait` it before the function returns). Its stderr
+  is left attached to this process's own (the systemd journal) rather
+  than discarded, so a real `ip monitor` failure is visible.
+- **Coprocess death guard.** bash unsets both `IC_MON` (the array) and
+  `IC_MON_PID` the instant the coprocess's process exits - found via a
+  real production crash: the next `read -u "${IC_MON[0]}"` after that
+  crashed with `IC_MON[0]: unbound variable` under this script's
+  `set -u`, which systemd surfaced only as a fast `Restart=on-failure`
+  loop hitting its burst limit, no indication of the real cause (worsened
+  by the stderr-discarding above). The loop now checks `[ -n
+  "${IC_MON_PID:-}" ]` before touching `${IC_MON[0]}`; if the coprocess is
+  gone, it logs the failure and restarts the coprocess (bounded to 5
+  attempts per `watch_iface` call - `mon_failures` - before giving up via
+  `exit 1` and deferring to systemd's own restart policy) instead of
+  reading from it.
 - Loop condition: `[ "$terminate" -eq 0 ] && [ -e "${IC_SYS_CLASS_NET}/${iface}" ]`
   - the second removal-detection mechanism (direct existence check),
   complementing `BindsTo=`'s SIGTERM (belt-and-braces per confirmed
   decision #8 - either alone has a plausible gap: a missed/late uevent
   for `BindsTo`, a slow poll tick for this check).
-- `read -t 1 -r -u "${IC_MON[0]}" line` each iteration - a timeout, not a
-  blocking read, so the loop condition (and thus the `terminate` flag and
-  the existence check) gets re-evaluated roughly once a second regardless
-  of whether `ip monitor` actually emitted anything. This is what makes
-  the loop notice a stop signal or removal promptly without polling the
-  interface's own state on a busy timer - the *state* checks
-  (`iface_is_ready`, `get_addresses`) are still only as expensive as
-  reading a couple of sysfs files and running `ip -o addr show`, not a
-  network operation, so doing them every ~1s regardless of whether
-  `ip monitor` produced a line is cheap.
+- `read -t 1 -r -u "${IC_MON[0]}" line` each iteration (when the
+  coprocess is alive) - a timeout, not a blocking read, so the loop
+  condition (and thus the `terminate` flag and the existence check) gets
+  re-evaluated roughly once a second regardless of whether `ip monitor`
+  actually emitted anything. This is what makes the loop notice a stop
+  signal or removal promptly without polling the interface's own state on
+  a busy timer - the *state* checks (`iface_is_ready`, `get_addresses`)
+  are still only as expensive as reading a couple of sysfs files and
+  running `ip -o addr show`, not a network operation, so doing them every
+  ~1s regardless of whether `ip monitor` produced a line is cheap.
 - State transitions (ready/not-ready via `iface_is_ready`, address set
   via `get_addresses`, compared against the previous iteration's values)
   call `run_matched(iface, "add"|"remove")` - see "Rule freshness" below.
@@ -180,6 +214,82 @@ and `cmd_run`'s startup matching use) rather than caching what matched at
   that pattern and runs zero remove commands - no special-casing needed
   to make "`--uninstall` never runs remove commands" true; it falls out
   of the ordering plus this shared re-read logic.
+
+## Convenience variables for add/remove commands
+
+`run_command_for_iface()` exports `IFACE` plus seven more variables to
+every `--add`/`--remove` command - see README "Convenience variables" for
+the user-facing table and the documented simple-case-only caveat.
+`kind` ("add"|"remove", now a third parameter passed by every caller -
+`run_matched()` and `apply_now_for_pattern()`) picks how they're sourced:
+
+- `kind="add"`: `set_iface_address_vars(iface)` and
+  `set_iface_gateway_vars(iface)` query `ip` live (the interface is
+  known-ready at this point - "add" only ever runs once it is), then
+  `write_iface_state(iface)` stashes the result.
+- `kind="remove"`: `read_iface_state(iface)` reads that same stash back,
+  rather than querying `ip` again - deliberately, not just an
+  optimization: by the time a remove command runs, especially one
+  triggered by the interface's own removal (see watch_iface's loop
+  condition), the interface itself may already be gone, so a live query
+  would come back empty. Reading the add-time stash instead means remove
+  always sees the same values add did for that same lifecycle
+  transition, not whatever's live at that moment on the rarer occasions
+  the interface happens to still be present.
+
+`set_iface_address_vars(iface)`: `IP4_ADDRESS`/`IP4_NETMASK`/
+`IP4_PREFIX` from the first line of `ip -4 -o addr show dev <iface> scope
+global` (empty if none), and `IP6_ADDRESS`/`IP6_PREFIX` the same way for
+`-6`, no netmask - `IP4_NETMASK` is computed from `IP4_PREFIX` by
+`ipv4_prefix_to_netmask()`, since `ip` itself only reports the prefix
+length, not a dotted mask.
+
+`set_iface_gateway_vars(iface)`: `IP4_GATEWAY`/`IP6_GATEWAY` from the
+`via` field of `ip -4|-6 route show default dev <iface>` (empty if the
+interface has no default route in that family).
+
+`ipv4_prefix_to_netmask(prefix)`: `0.0.0.0`-`255.255.255.255` from bash
+arithmetic alone (`(0xffffffff << (32 - prefix)) & 0xffffffff`, then
+split into octets) - no external tool (e.g. `ipcalc`) needed. The `/0`
+edge case works without special-casing: bash's arithmetic is 64-bit, so
+shifting the 32-bit all-ones mask left by 32 pushes it entirely out of
+the low 32 bits, and masking back down with `0xffffffff` correctly
+yields `0`.
+
+### State stash (`IC_STATE_DIR`, `/run/interface-configurator` by default)
+
+One `<iface>.env` file per interface (not per pattern - the
+address/gateway it holds is a property of the interface, shared by every
+pattern watching it), holding the seven `IP4_*`/`IP6_*` variables as
+`%q`-quoted `KEY=value` lines, sourced back directly (`. "$path"`) rather
+than parsed:
+
+- `iface_state_path(iface)`: `"${IC_STATE_DIR}/${iface}.env"`.
+- `write_iface_state(iface)`: writes the current `IP4_*`/`IP6_*` globals
+  (already set by the two live-query helpers above). Best-effort - if
+  `IC_STATE_DIR` can't be created/written (e.g. `--run` invoked by hand
+  as a non-root user for testing), logs a warning and returns 0 rather
+  than failing the add command over it.
+- `read_iface_state(iface)`: clears all seven variables first (empty
+  string, never left unset - this script runs under `set -u`), then
+  sources the state file only if it exists. A remove command for an
+  interface that never got a successful add (so no stash was ever
+  written) simply sees them all empty, the same as a live query that
+  found nothing would have produced.
+- `remove_iface_state(iface)`: deletes the state file. Called once from
+  `watch_iface`'s own exit path (after its own final remove commands, if
+  any), not from `run_command_for_iface`/`run_matched` - a stash outlives
+  any single remove command, since only the watcher going away for good
+  means this interface's stashed values are no longer relevant (a later
+  reused interface name starts fresh, via its own next add).
+- `/run` (tmpfs, cleared on reboot) is the correct home for this: stashed
+  state from a previous boot is never valid for the current one.
+
+Both live-query helpers set their variables as plain (non-`local`)
+assignments so `run_command_for_iface`/`write_iface_state` can read them
+back after calling them; every variable is always initialized (empty
+string, not left unset) by whichever path populates them, so a lookup
+that finds nothing never trips this script's `set -u`.
 
 ## `--install`'s apply-now step
 

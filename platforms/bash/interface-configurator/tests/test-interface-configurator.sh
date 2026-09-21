@@ -344,8 +344,8 @@ else
 fi
 
 if [ -n "$conf" ] && grep -q "^PATTERN=" "$conf" 2>/dev/null \
-   && grep -q "^ADD_COUNT=1$" "$conf" 2>/dev/null \
-   && grep -q "^REMOVE_COUNT=0$" "$conf" 2>/dev/null; then
+   && [ "$(grep -c '^ADD=' "$conf" 2>/dev/null)" -eq 1 ] \
+   && [ "$(grep -c '^REMOVE=' "$conf" 2>/dev/null)" -eq 0 ]; then
   pass "rule config stores the pattern and one add command, zero remove commands"
 else
   fail "rule config content unexpected: $(cat "$conf" 2>/dev/null)"
@@ -383,7 +383,7 @@ root="${WORKDIR}/upsert"
 run_script "$root" --install 'wlan*' --add 'echo first' >/dev/null 2>&1
 run_script "$root" --install 'wlan*' --add 'echo second' --add 'echo third' --remove 'echo cleanup' >/dev/null 2>&1
 confs=("${root}/rules.d"/*.conf)
-if [ ${#confs[@]} -eq 1 ] && grep -q '^ADD_COUNT=2$' "${confs[0]}" && grep -q '^REMOVE_COUNT=1$' "${confs[0]}" \
+if [ ${#confs[@]} -eq 1 ] && [ "$(grep -c '^ADD=' "${confs[0]}")" -eq 2 ] && [ "$(grep -c '^REMOVE=' "${confs[0]}")" -eq 1 ] \
    && ! grep -q 'first' "${confs[0]}"; then
   pass "installing the same pattern twice upserts (one file, latest add/remove lists)"
 else
