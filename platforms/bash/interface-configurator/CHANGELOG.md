@@ -9,6 +9,21 @@ folded into one running "in progress" entry there instead. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 0.0.1-dev6
+The `0.0.1-dev2` coprocess-death guard only covered the watch loop's own
+`read -u "${IC_MON[0]}"` - it missed two other unguarded references to
+`$IC_MON_PID` that run *before* the loop ever gets a chance to catch a
+dead coprocess: the `log` line right after starting it, and the `log`
+line right after restarting it inside the retry branch. If `ip monitor`
+exits before either of those lines runs, bash unsets `IC_MON`/
+`IC_MON_PID` first, and the same `unbound variable` crash under `set -u`
+happens again - a real production recurrence of the exact bug
+`0.0.1-dev2` was meant to fix, just one statement earlier. Both lines now
+read `${IC_MON_PID:-unknown}`, matching the guard already used at every
+other reference to this variable, so a coprocess that dies immediately
+(even before its own startup is logged) is caught by the existing
+bounded-retry-then-give-up logic instead of crashing the watcher outright.
+
 ## 0.0.1-dev5
 The per-pattern rule config file (`${IC_RULES_DIR}/<slug>.conf`,
 `/etc/interface-configurator/rules.d/` by default) is now a plain-text

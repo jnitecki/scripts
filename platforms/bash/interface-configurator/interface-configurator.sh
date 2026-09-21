@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 0.0.1-dev5
+# Version: 0.0.1-dev6
 # Category: networking
 # Description: Watches a matching network interface and runs registered add/remove commands as it transitions
 # Upgrade-Source: github.com/jnitecki/scripts@bash/interface-configurator
@@ -16,7 +16,7 @@
 # see script-maintenance-convention.md section 3. A script with no stable
 # release yet (this one) starts that same way, from the section 4
 # bootstrap baseline (0.0.0 -> first real version 0.0.1-dev1):
-#   0.0.1 (in progress - currently 0.0.1-dev5) - initial implementation:
+#   0.0.1 (in progress - currently 0.0.1-dev6) - initial implementation:
 #           --install/--uninstall/--run, shared systemd template unit (a
 #           persistent per-interface watcher, bound to the interface's own
 #           device unit), per-pattern udev rule, add/remove command pairs
@@ -25,6 +25,10 @@
 #           monitor coprocess no longer crashes the watcher on an unbound
 #           variable if it exits unexpectedly - it's now detected, logged,
 #           and restarted (bounded), and its stderr is no longer discarded.
+#           Every reference to the coprocess's PID (not just the watch
+#           loop's own read) is now guarded the same way, including right
+#           after starting/restarting it - a coprocess that dies before
+#           even that first log line ran was still an unguarded crash.
 #           --add/--remove commands now also get IP4_ADDRESS/IP4_NETMASK/
 #           IP4_PREFIX/IP4_GATEWAY and IP6_ADDRESS/IP6_PREFIX/IP6_GATEWAY
 #           exported alongside IFACE - convenience shortcuts for the
@@ -710,7 +714,7 @@ watch_iface() {
   # discarded, so a real `ip monitor` failure is visible instead of
   # vanishing silently.
   coproc IC_MON ip monitor link addr dev "$iface"
-  log "watching '${iface}' via ip monitor (pid ${IC_MON_PID})"
+  log "watching '${iface}' via ip monitor (pid ${IC_MON_PID:-unknown})"
 
   while [ "$terminate" -eq 0 ] && [ -e "${IC_SYS_CLASS_NET}/${iface}" ]; do
     line=""
@@ -731,7 +735,7 @@ watch_iface() {
       fi
       sleep 1
       coproc IC_MON ip monitor link addr dev "$iface"
-      log "restarted ip monitor coprocess for '${iface}' (pid ${IC_MON_PID})"
+      log "restarted ip monitor coprocess for '${iface}' (pid ${IC_MON_PID:-unknown})"
     fi
 
     if iface_is_ready "$iface"; then

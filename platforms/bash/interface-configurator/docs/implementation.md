@@ -174,7 +174,13 @@ end.
   gone, it logs the failure and restarts the coprocess (bounded to 5
   attempts per `watch_iface` call - `mon_failures` - before giving up via
   `exit 1` and deferring to systemd's own restart policy) instead of
-  reading from it.
+  reading from it. Every other reference to `$IC_MON_PID` is guarded the
+  same way (`${IC_MON_PID:-}`/`${IC_MON_PID:-unknown}`), including the
+  `log` lines immediately after starting and after restarting the
+  coprocess (`0.0.1-dev6` - a second real production recurrence: a
+  coprocess dying before even its own startup log line ran hit the same
+  crash one statement earlier than the read loop's guard covers) and the
+  `kill`/`wait` pair on `watch_iface`'s exit path.
 - Loop condition: `[ "$terminate" -eq 0 ] && [ -e "${IC_SYS_CLASS_NET}/${iface}" ]`
   - the second removal-detection mechanism (direct existence check),
   complementing `BindsTo=`'s SIGTERM (belt-and-braces per confirmed

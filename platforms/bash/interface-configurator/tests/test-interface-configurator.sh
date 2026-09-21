@@ -129,6 +129,31 @@ for tool in systemctl udevadm ip timeout; do
 done
 chmod +x "${STUBBIN_NOID}"/*
 
+# A third stub dir whose `ip monitor link addr dev <iface>` (watch_iface's
+# own coprocess invocation) exits immediately instead of staying up - to
+# reproduce the production crash where a coprocess dying before its own
+# `log "watching ... (pid ${IC_MON_PID})"` line even runs unset IC_MON_PID
+# under `set -u`, out from under an unguarded reference to it. The single-
+# object `monitor link dev <iface>` shape (wait_for_ready's own call) is
+# left behaving normally, since that one isn't under test here.
+STUBBIN_DIECOPROC="${WORKDIR}/stubbin-diecoproc"
+mkdir -p "${STUBBIN_DIECOPROC}"
+for tool in systemctl udevadm timeout id; do
+  cp "${STUBBIN}/${tool}" "${STUBBIN_DIECOPROC}/${tool}"
+done
+cat > "${STUBBIN_DIECOPROC}/ip" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "monitor" ] && [ "\$3" = "addr" ]; then
+  echo "ip monitor: simulated instant failure" >&2
+  exit 1
+elif [ "\$1" = "monitor" ]; then
+  while true; do echo "line"; sleep 0.05; done
+elif [ "\$1" = "-o" ] && [ "\$2" = "addr" ] && [ "\$3" = "show" ] && [ "\$4" = "dev" ]; then
+  cat "${WORKDIR}/addrs/\$5.txt" 2>/dev/null
+fi
+EOF
+chmod +x "${STUBBIN_DIECOPROC}"/*
+
 # args: $1=fixture root -> sets IC_* env vars pointing at fresh scratch
 # locations under it, and PATH so the stubs above are found first. Used as
 # a prefix before every "happy path" invocation of the script below.
@@ -316,6 +341,7 @@ if ! $HAVE_BASH43; then
   skip "--run watch loop: address change while ready -> remove then add"
   skip "--run watch loop: interface removed -> runs remove commands and exits 0"
   skip "--run watch loop: SIGTERM with config already gone -> exits 0 without running remove commands"
+  skip "--run watch loop: ip monitor coprocess dying immediately doesn't crash on an unbound variable"
   echo ""
   echo "${SKIPPED} test(s) skipped (bash ${RESOLVED_BASH_VERSION} < 4.3 - namerefs/coproc unavailable)."
   if [ "$FAILURES" -eq 0 ]; then
@@ -591,6 +617,44 @@ if ! kill -0 "$RUN_PID" 2>/dev/null && [ ! -s "$marker" ]; then
   pass "watch loop: SIGTERM with config already deleted exits without running remove commands"
 else
   fail "watch loop should not run remove commands when its config was already deleted before stopping"
+  kill "$RUN_PID" 2>/dev/null
+fi
+wait "$RUN_PID" 2>/dev/null
+
+# =============================================================================
+# --run watch loop: the ip monitor coprocess dying immediately (before
+# watch_iface's own first log line even runs) must not crash on an
+# unbound IC_MON_PID under `set -u` - a real production crash. Bounded
+# retries (mon_failures, 5 attempts) should instead run and this process
+# should exit 1 cleanly on its own once they're exhausted.
+# =============================================================================
+
+root="${WORKDIR}/run-diecoproc"
+fixture_iface "$root" "eth8" true
+run_script "$root" --install 'eth*' --add 'true' >/dev/null 2>&1
+
+errlog="${root}/run.err"
+(
+  eval "$(fixture_env "$root" | grep -v '^PATH=')"
+  export IC_SYSTEMD_DIR IC_UDEV_RULES_DIR IC_RULES_DIR IC_SYS_CLASS_NET IC_READY_TIMEOUT_SECONDS
+  PATH="${STUBBIN_DIECOPROC}:${PATH}" "$SCRIPT" --run eth8
+) >/dev/null 2>"$errlog" &
+RUN_PID=$!
+
+# 5 retries, ~1s apart (mon_failures' own `sleep 1`), plus the loop's own
+# ~1s poll tick each time round - comfortably done well within 10s.
+waited=0
+while kill -0 "$RUN_PID" 2>/dev/null && [ "$waited" -lt 10 ]; do
+  sleep 1
+  waited=$((waited + 1))
+done
+
+if ! kill -0 "$RUN_PID" 2>/dev/null \
+   && ! grep -qi 'unbound variable' "$errlog" \
+   && grep -q "won't stay up - giving up" "$errlog"; then
+  pass "watch loop: an ip monitor coprocess that dies immediately is retried, then exits cleanly (no unbound-variable crash)"
+else
+  fail "watch loop should retry a coprocess that dies immediately and exit cleanly, not crash on an unbound variable: $(cat "$errlog" 2>/dev/null)"
   kill "$RUN_PID" 2>/dev/null
 fi
 wait "$RUN_PID" 2>/dev/null
