@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 0.0.1-dev7
+# Version: 0.0.1-dev8
 # Category: networking
 # Description: Watches a matching network interface and runs registered add/remove commands as it transitions
 # Upgrade-Source: github.com/jnitecki/scripts@bash/interface-configurator
@@ -16,7 +16,7 @@
 # see script-maintenance-convention.md section 3. A script with no stable
 # release yet (this one) starts that same way, from the section 4
 # bootstrap baseline (0.0.0 -> first real version 0.0.1-dev1):
-#   0.0.1 (in progress - currently 0.0.1-dev7) - initial implementation:
+#   0.0.1 (in progress - currently 0.0.1-dev8) - initial implementation:
 #           --install/--uninstall/--run, shared systemd template unit (a
 #           persistent per-interface watcher, bound to the interface's own
 #           device unit), per-pattern udev rule, add/remove command pairs
@@ -34,6 +34,14 @@
 #           ExecStart - it now inherits the parent's already-correct
 #           resolved path instead, so the unit no longer ends up pointing
 #           at a temp/scratch file the trial run deletes right after.
+#           watch_iface's coprocess no longer gives it an explicit NAME
+#           (IC_MON) - confirmed, by building bash 5.1.16 from source,
+#           that an explicit NAME with a plain external command never
+#           actually works on real bash: it silently never populates the
+#           PID/fd variables at all and prints a spurious "command not
+#           found". The anonymous form (bash's own default COPROC/
+#           COPROC_PID) is confirmed correct on both real bash and bash
+#           3.2's fallback path.
 #           --add/--remove commands now also get IP4_ADDRESS/IP4_NETMASK/
 #           IP4_PREFIX/IP4_GATEWAY and IP6_ADDRESS/IP6_PREFIX/IP6_GATEWAY
 #           exported alongside IFACE - convenience shortcuts for the
@@ -736,15 +744,32 @@ watch_iface() {
   # attached to this process's own stderr (the systemd journal), not
   # discarded, so a real `ip monitor` failure is visible instead of
   # vanishing silently.
-  coproc IC_MON ip monitor link addr dev "$iface"
-  log "watching '${iface}' via ip monitor (pid ${IC_MON_PID:-unknown})"
+  #
+  # Deliberately anonymous (`coproc` with no NAME, so bash uses its
+  # default `COPROC`/`COPROC_PID`) - a real production bug found the hard
+  # way: `coproc NAME command args...` (an explicit NAME followed by a
+  # *simple* external command, confirmed by building bash 5.1.16 from
+  # source and reproducing directly) never actually populates
+  # `NAME`/`NAME_PID` at all - it emits a spurious `NAME: command not
+  # found` instead. Wrapping the command in a compound form (`coproc NAME
+  # { cmd; }` or `coproc NAME ( cmd )`) does disambiguate correctly on
+  # real bash, but reintroduces the *other* problem already documented
+  # above `upgrade_main` for brace groups: on bash 3.2 (which doesn't
+  # recognize `coproc` as a keyword at all), both compound forms are a
+  # file-wide syntax error (`bash -n` fails outright), not a clean local
+  # one. Dropping the NAME avoids both problems at once: it's the one
+  # form confirmed to actually work on real bash (4.0+), and on bash 3.2
+  # it still fails cleanly and locally (`coproc: command not found` at
+  # this one line only, verified via `bash -n` not erroring).
+  coproc ip monitor link addr dev "$iface"
+  log "watching '${iface}' via ip monitor (pid ${COPROC_PID:-unknown})"
 
   while [ "$terminate" -eq 0 ] && [ -e "${IC_SYS_CLASS_NET}/${iface}" ]; do
     line=""
-    if [ -n "${IC_MON_PID:-}" ]; then
-      read -t 1 -r -u "${IC_MON[0]}" line 2>/dev/null
+    if [ -n "${COPROC_PID:-}" ]; then
+      read -t 1 -r -u "${COPROC[0]}" line 2>/dev/null
     else
-      # bash unsets IC_MON/IC_MON_PID the instant the coprocess exits -
+      # bash unsets COPROC/COPROC_PID the instant the coprocess exits -
       # without this check, the read above would crash on an unbound
       # variable under `set -u` instead of failing visibly (this is what
       # used to happen here). Restart it, bounded, so a coprocess that
@@ -757,8 +782,8 @@ watch_iface() {
         exit 1
       fi
       sleep 1
-      coproc IC_MON ip monitor link addr dev "$iface"
-      log "restarted ip monitor coprocess for '${iface}' (pid ${IC_MON_PID:-unknown})"
+      coproc ip monitor link addr dev "$iface"
+      log "restarted ip monitor coprocess for '${iface}' (pid ${COPROC_PID:-unknown})"
     fi
 
     if iface_is_ready "$iface"; then
@@ -785,8 +810,8 @@ watch_iface() {
     fi
   done
 
-  kill "${IC_MON_PID:-}" 2>/dev/null
-  wait "${IC_MON_PID:-}" 2>/dev/null
+  kill "${COPROC_PID:-}" 2>/dev/null
+  wait "${COPROC_PID:-}" 2>/dev/null
 
   if [ "$ready" -eq 1 ]; then
     run_matched "$iface" remove

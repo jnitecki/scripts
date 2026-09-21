@@ -132,7 +132,7 @@ chmod +x "${STUBBIN_NOID}"/*
 # A third stub dir whose `ip monitor link addr dev <iface>` (watch_iface's
 # own coprocess invocation) exits immediately instead of staying up - to
 # reproduce the production crash where a coprocess dying before its own
-# `log "watching ... (pid ${IC_MON_PID})"` line even runs unset IC_MON_PID
+# `log "watching ... (pid ${COPROC_PID})"` line even runs unset COPROC_PID
 # under `set -u`, out from under an unguarded reference to it. The single-
 # object `monitor link dev <iface>` shape (wait_for_ready's own call) is
 # left behaving normally, since that one isn't under test here.
@@ -624,7 +624,7 @@ wait "$RUN_PID" 2>/dev/null
 # =============================================================================
 # --run watch loop: the ip monitor coprocess dying immediately (before
 # watch_iface's own first log line even runs) must not crash on an
-# unbound IC_MON_PID under `set -u` - a real production crash. Bounded
+# unbound COPROC_PID under `set -u` - a real production crash. Bounded
 # retries (mon_failures, 5 attempts) should instead run and this process
 # should exit 1 cleanly on its own once they're exhausted.
 # =============================================================================

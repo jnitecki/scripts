@@ -9,6 +9,35 @@ folded into one running "in progress" entry there instead. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 0.0.1-dev8
+Fixes a third real production bug in the same `watch_iface` coprocess,
+unrelated to `0.0.1-dev2`/`0.0.1-dev6`'s fixes: `coproc IC_MON ip monitor
+link addr dev "$iface"` (an explicit NAME followed by a plain external
+command) turns out to never work correctly on real bash at all -
+confirmed by building bash 5.1.16 (the exact version reported from a
+live host still hitting this) from source and reproducing directly. It
+never populates `IC_MON`/`IC_MON_PID`, prints a spurious `IC_MON: command
+not found`, and the coprocess is effectively untracked the instant it
+starts - on the affected host this happened on every single attempt (not
+the timing-dependent race `0.0.1-dev2`/`0.0.1-dev6` were fixing), so
+`watch_iface` always fell into the "coprocess exited unexpectedly" retry
+path, exhausted all 5 attempts, and exited 1 every time, forever
+crash-looping under systemd's `Restart=on-failure`. Fixed by dropping the
+explicit NAME and using bash's own default coprocess name instead -
+`coproc ip monitor ...` / `$COPROC_PID` / `${COPROC[0]}` - confirmed
+correct on real bash (PID stays valid for as long as the process runs,
+restarting it later also works) and still failing cleanly and locally on
+bash 3.2 (`coproc: command not found` at that one line only, `bash -n`
+raises no error for the rest of the file - unlike the compound-command
+forms, which were tried and rejected: both `coproc NAME { cmd; }` and
+`coproc NAME ( cmd )` cause `bash -n` to fail on bash 3.2 for the *whole
+file*, the same file-wide corruption `0.0.1-dev1` already ruled out the
+brace-group form for). Running the test suite directly against a real
+bash 4.3+ interpreter (rather than only macOS's bash 3.2, which skips
+every `coproc`-touching test) surfaced two further watch-loop tests that
+were already silently broken by this same bug before this fix, entirely
+unrelated to whatever specific test was being added at the time.
+
 ## 0.0.1-dev7
 Fixes a production crash-loop caused by a *previous* `--install` run,
 unrelated to `0.0.1-dev6`'s fix: `upgrade_main`'s self-upgrade trial run

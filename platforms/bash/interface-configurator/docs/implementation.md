@@ -43,10 +43,10 @@ repo's bash-3.2-safe baseline:
   `REMOVE_COMMANDS` arrays by reference rather than serializing them
   through a string.
 - `coproc` (bash 4.0+) in `watch_iface` - runs `ip monitor` as a
-  background coprocess with a known PID (`$NAME_PID`) and readable fd
-  (`${NAME[0]}`), which a plain `cmd | while read; do ...; done` pipeline
-  can't offer (no reliably portable way to get the piped command's PID
-  back to kill it later).
+  background coprocess with a known PID (`$COPROC_PID`) and readable fd
+  (`${COPROC[0]}`), which a plain `cmd | while read; do ...; done`
+  pipeline can't offer (no reliably portable way to get the piped
+  command's PID back to kill it later).
 
 This is an accepted, documented exception - see this script's own
 requirements doc "Conflict with cross-platform-shell-compatibility"
@@ -57,24 +57,45 @@ already requires systemd + udev, which have no macOS equivalent anyway;
 requiring bash 4.3+ on top costs nothing further given the whole script
 only runs on Linux, where bash 4+ is the norm).
 
-**Implementation note - a real parser hazard found during development.**
-`coproc NAME { cmd; }` (the brace-group form) is syntactically valid on
-real bash 4+, but bash 3.2 (which doesn't recognize `coproc` as a keyword
-at all) doesn't just fail to parse that one line - it appears to
-misinterpret the nested `{ ... }` as closing the *enclosing function's*
-own brace group early, corrupting how the rest of the file is parsed
-entirely (up to and including code with no relation to `watch_iface`,
-observed via `--help` itself breaking with an unrelated "unbound
-variable" error deep inside `watch_iface`'s body). Since `watch_iface`
-only ever needs to background a single simple command (`ip monitor ...`),
-the fix was to drop the brace group entirely and use the plain
-`coproc NAME simple-command` form instead - `coproc IC_MON ip monitor
-link addr dev "$iface"`. This form fails cleanly and
-locally on bash 3.2 (`coproc: command not found`, since 3.2 doesn't
-recognize the keyword and tries to run it as a literal command) without
-corrupting anything else, and it's simpler than the brace-group form
-regardless of bash version. Kept as the reference form for any future
-`coproc` usage in this script.
+**Implementation note - two real parser/runtime hazards found the hard
+way, resolved by using `coproc` anonymously (no NAME).**
+
+1. `coproc NAME { cmd; }` (the brace-group form) is syntactically valid on
+   real bash 4+, but bash 3.2 (which doesn't recognize `coproc` as a
+   keyword at all) doesn't just fail to parse that one line - it appears
+   to misinterpret the nested `{ ... }` as closing the *enclosing
+   function's* own brace group early, corrupting how the rest of the
+   file is parsed entirely (up to and including code with no relation to
+   `watch_iface`, observed via `--help` itself breaking with an unrelated
+   "unbound variable" error deep inside `watch_iface`'s body). The same
+   is true of the parenthesized-subshell form, `coproc NAME ( cmd )` -
+   confirmed directly: `bash -n` fails on the *whole file* for both forms
+   under bash 3.2, not just at that one line.
+2. The obvious fix for hazard 1 - drop the compound-command wrapper and
+   use the plain `coproc NAME simple-command` form instead, `coproc
+   IC_MON ip monitor link addr dev "$iface"` - was shipped as
+   `0.0.1-dev1` through `0.0.1-dev7` and looked correct (it fails cleanly
+   and locally on bash 3.2, `coproc: command not found`, since 3.2
+   doesn't recognize the keyword and tries to run it as a literal
+   command). It is not correct on real bash 4+: a **second**, unrelated
+   real production bug, confirmed by building bash 5.1.16 from source and
+   reproducing directly (`coproc FOO /bin/cat -` fails identically) -
+   `coproc NAME command` with an explicit NAME followed by a *simple*
+   external command (not a compound command) never actually populates
+   `NAME`/`NAME_PID` at all; it emits a spurious `NAME: command not
+   found` and the coprocess is untracked from the moment it starts. Every
+   `--run` on a real system was hitting this on every single attempt (not
+   a race - 100% reproducible), immediately falling into the "coprocess
+   exited unexpectedly" retry path and exhausting it every time.
+
+The fix that resolves both hazards at once: **omit the NAME** and let it
+default to bash's own `COPROC`/`COPROC_PID`/`COPROC[0]` - confirmed
+correct on real bash (4.0+: PID stays valid for as long as the process
+runs, the fd reads correctly, restarting it later works too), and on
+bash 3.2 it still fails cleanly and locally at that one line only
+(`coproc: command not found`, `bash -n` reports no error at all for the
+rest of the file). Kept as the reference form for any future `coproc`
+usage in this script - explicit NAME is the one form confirmed broken.
 
 ## Pattern slug
 
@@ -192,24 +213,27 @@ end.
 `watch_iface()`:
 - `trap 'terminate=1' TERM INT` - sets a flag the loop condition checks,
   rather than trying to interrupt work mid-command.
-- `coproc IC_MON ip monitor link addr dev "$iface"` - backgrounds the
-  monitor process; `${IC_MON[0]}` is its readable fd, `$IC_MON_PID` its
-  PID (used to `kill`/`wait` it before the function returns). Its stderr
-  is left attached to this process's own (the systemd journal) rather
-  than discarded, so a real `ip monitor` failure is visible.
-- **Coprocess death guard.** bash unsets both `IC_MON` (the array) and
-  `IC_MON_PID` the instant the coprocess's process exits - found via a
-  real production crash: the next `read -u "${IC_MON[0]}"` after that
-  crashed with `IC_MON[0]: unbound variable` under this script's
+- `coproc ip monitor link addr dev "$iface"` - backgrounds the monitor
+  process; no explicit NAME (see "Bash 4.3+ requirement" above for why -
+  `0.0.1-dev8` found that form outright broken on real bash), so it uses
+  bash's default `COPROC`/`COPROC_PID`: `${COPROC[0]}` is its readable
+  fd, `$COPROC_PID` its PID (used to `kill`/`wait` it before the function
+  returns). Its stderr is left attached to this process's own (the
+  systemd journal) rather than discarded, so a real `ip monitor` failure
+  is visible.
+- **Coprocess death guard.** bash unsets both `COPROC` (the array) and
+  `COPROC_PID` the instant the coprocess's process exits - found via a
+  real production crash: the next `read -u "${COPROC[0]}"` after that
+  crashed with `COPROC[0]: unbound variable` under this script's
   `set -u`, which systemd surfaced only as a fast `Restart=on-failure`
   loop hitting its burst limit, no indication of the real cause (worsened
   by the stderr-discarding above). The loop now checks `[ -n
-  "${IC_MON_PID:-}" ]` before touching `${IC_MON[0]}`; if the coprocess is
+  "${COPROC_PID:-}" ]` before touching `${COPROC[0]}`; if the coprocess is
   gone, it logs the failure and restarts the coprocess (bounded to 5
   attempts per `watch_iface` call - `mon_failures` - before giving up via
   `exit 1` and deferring to systemd's own restart policy) instead of
-  reading from it. Every other reference to `$IC_MON_PID` is guarded the
-  same way (`${IC_MON_PID:-}`/`${IC_MON_PID:-unknown}`), including the
+  reading from it. Every other reference to `$COPROC_PID` is guarded the
+  same way (`${COPROC_PID:-}`/`${COPROC_PID:-unknown}`), including the
   `log` lines immediately after starting and after restarting the
   coprocess (`0.0.1-dev6` - a second real production recurrence: a
   coprocess dying before even its own startup log line ran hit the same
@@ -220,7 +244,7 @@ end.
   complementing `BindsTo=`'s SIGTERM (belt-and-braces per confirmed
   decision #8 - either alone has a plausible gap: a missed/late uevent
   for `BindsTo`, a slow poll tick for this check).
-- `read -t 1 -r -u "${IC_MON[0]}" line` each iteration (when the
+- `read -t 1 -r -u "${COPROC[0]}" line` each iteration (when the
   coprocess is alive) - a timeout, not a blocking read, so the loop
   condition (and thus the `terminate` flag and the existence check) gets
   re-evaluated roughly once a second regardless of whether `ip monitor`
