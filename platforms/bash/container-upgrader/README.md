@@ -179,6 +179,79 @@ Use `--skip-quadlet-restart` to disable only the automatic
 the manual `systemd.unit` trigger, or `--skip-systemd-restart` to disable
 this whole mechanism and manage every container like any other.
 
+## Run summary log
+
+This script typically runs unattended (cron, a scheduler, or by hand every
+so often), with no reliable, uniform way across platforms to check when it
+last ran or how that run went — cron/a scheduler isn't guaranteed
+configured, and OS-level logging isn't a dependable fallback either: macOS's
+unified log has no Linux equivalent, and even on Linux a syslog daemon or
+`systemd-journald` isn't guaranteed installed (especially on minimal
+container-host distros).
+
+To close that gap, every real run (i.e. not `--dry-run`, `--upgrade-check`,
+or `--upgrade-only`) appends one line to:
+
+```
+${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/bash_container-upgrader.log
+```
+
+Each line is a single JSON object:
+
+```json
+{"date":"2026-09-21T09:31:02Z","version":"1.1.8","mode":"safe","containers_not_uptodate":0,"images_updated_successfully":2,"images_update_failed":0,"containers_updated_successfully":3,"containers_update_failed":0}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `date` | Run timestamp, ISO-8601 UTC. |
+| `version` | The script version that ran. |
+| `mode` | `simple` or `safe`. |
+| `containers_not_uptodate` | Containers not confirmed running the latest image afterward — image pull failed, or a restart wasn't even attempted (skipped as already-crashing, or a systemd-unit restart that couldn't safely proceed, including the "requires root" case). |
+| `images_updated_successfully` | Unique images successfully pulled with an actual version change. |
+| `images_update_failed` | Unique images whose pull failed. |
+| `containers_updated_successfully` | Containers confirmed running the new image and healthy. |
+| `containers_update_failed` | Containers whose image pulled fine but whose restart/upgrade didn't cleanly succeed — including one that was rolled back and ended up healthy again, since the update itself still failed even though the container wasn't left broken. |
+
+The file is trimmed to its most recent 50 entries after every run — check
+the latest one with `tail -n1 <file> | jq .`. Writing this log is
+best-effort and never affects the run's own exit code.
+
+## Login status banner
+
+**Ubuntu/Debian only** — this uses `pam_motd`'s dynamic MOTD mechanism
+(`/etc/update-motd.d/`), not a generic cross-distro facility.
+
+`--status` prints at most one line, derived from the run summary log above,
+and does nothing else — no self-upgrade check, no docker/podman
+dependency, safe to run unattended:
+
+- `"N container(s) are awaiting upgrade."` — if the last run left any
+  container not confirmed successfully on the latest image
+  (`containers_not_uptodate + containers_update_failed > 0`).
+- `"Containers were last upgraded N day(s) ago."` — otherwise, if at least
+  `--status-stale-days` (default `3`) days have passed since that run.
+- Nothing — otherwise, or if there's no log yet.
+
+To show this automatically on every login:
+
+```
+sudo ./container-upgrader.sh --register-banner
+```
+
+This installs `/etc/update-motd.d/92-container-upgrader`, a small generated
+script that runs `--status` as whichever user invoked `--register-banner`
+(via `sudo`, or the current user if run directly as root) — that user is
+fixed at registration time, not detected per login, so the banner always
+shows *that* user's status regardless of who actually logs in. Add `--status-stale-days N` to
+`--register-banner` to bake a custom threshold into the installed banner.
+Re-running `--register-banner` regenerates it (e.g. after moving the script); only one
+user's banner can be registered per host at a time. Remove it with:
+
+```
+sudo ./container-upgrader.sh --unregister-banner
+```
+
 ## Options
 
 | Option | Description |
@@ -196,6 +269,10 @@ this whole mechanism and manage every container like any other.
 | `--engine docker\|podman` | Container engine to use. If omitted, auto-detects: docker if present, else podman, else errors out. |
 | `--skip-config-check` | In safe mode, skip comparing the recreated container's runtime config against the original. Use if a specific container reliably shows a diff you've already verified is harmless. |
 | `--dry-run` | Show what would happen, take no action, and skip the health-outcome summary (nothing was run). |
+| `--status` | Print at most one line from the run summary log and exit. See [Login status banner](#login-status-banner). |
+| `--status-stale-days N` | Days since the last run before `--status` shows the "last upgraded N day(s) ago" line. Default: `3`. Only valid with `--status` or `--register-banner` (an error otherwise); with `--register-banner` it is carried into the installed login banner. |
+| `--register-banner` | Install a `/etc/update-motd.d/` script that runs `--status` on every login. Requires root. Ubuntu/Debian only. See [Login status banner](#login-status-banner). |
+| `--unregister-banner` | Remove the script `--register-banner` installed. Requires root. |
 | `--upgrade-type replacement\|overwrite\|link\|memory\|none` | Caps which self-upgrade apply mode is attempted (falls back to a weaker mode automatically if the requested one isn't possible on this filesystem); `none` disables self-upgrade entirely. Default: unset (tries `replacement` first, cascading down). Not combinable with `--upgrade-check` or `--no-autoupdate`. |
 | `--upgrade-level dev\|alpha\|beta\|rc\|stable` | Minimum release channel eligible for self-upgrade. Default: unset (this script's own level — same-or-higher than what's currently running). |
 | `--upgrade-check` | Report what a self-upgrade would do (and which apply mode this filesystem supports) and exit — no download, no change made. Not combinable with `--upgrade-type` or `--upgrade-only`. |

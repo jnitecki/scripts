@@ -2,7 +2,7 @@
 <!-- CATEGORY-FILES: CONTAINERS.md NETWORKING.md -->
 # Script Catalog
 
-_Generated 2026-09-21 09:46 UTC. Regenerate with `tools/generate-catalog.sh`._
+_Generated 2026-09-21 16:37 UTC. Regenerate with `tools/generate-catalog.sh`._
 
 | Name | Description | Categories | Platforms |
 |---|---|---|---|

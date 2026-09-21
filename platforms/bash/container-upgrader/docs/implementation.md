@@ -342,3 +342,127 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
     and owner:group — while a matching no-cache control run left the
     original file byte-for-byte untouched, confirming no regression to the
     pre-existing cooldown-skip behavior.
+- **Run summary log (1.1.8-dev1)** — see
+  `docs/requirements/implemented/run-summary-log.md`: `write_run_state_log()`
+  (defined right where it's called, in the Report section, same local-helper
+  pattern as `status_label()`) appends one `jq`-built JSON-lines entry to
+  `STATE_LOG_FILE` (`${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/
+  bash_container-upgrader.log` — a script-level constant defined alongside
+  the self-upgrade identity constants, but explicitly not part of that
+  block: `XDG_STATE_HOME`, not `XDG_CACHE_HOME`, since this is a meaningful
+  record rather than disposable cache), then trims the file to its most
+  recent `STATE_LOG_MAX_ENTRIES` (50) lines via `tail`. Called once, right
+  after the existing `count_*` summary tally loop computes everything it
+  needs — naturally skipped by `--dry-run` (which `exit`s before that tally
+  even runs) and by `--upgrade-check`/`--upgrade-only` (which exit before
+  any container work). The five logged counts map onto the existing
+  `RESULT` outcome tally with no new per-container classification needed:
+  `containers_updated_successfully` sums `count_upgraded`/`count_recovered`/
+  `count_upgraded_externally`/`count_upgraded_via_quadlet`/
+  `count_upgraded_via_manual_unit`; `containers_update_failed` sums
+  `count_rolled_back_working`/`count_now_failing`/`count_still_failing`/
+  `count_reconstruct_failed`/`count_reverted_externally`/
+  `count_external_config_discrepancy`; `containers_not_uptodate` sums
+  `count_pull_failed`/the three `count_systemd_unit_*`/
+  `count_skipped_crashing` — together an exact partition of all 17 `RESULT`
+  values (the remainder, containers never attempted because already current,
+  plus `restarted`, are correctly uncounted). `images_updated_successfully`
+  reuses `${#IMAGES_UPGRADED[@]}`; `images_update_failed` is a new
+  `IMAGES_PULL_FAILED_COUNT` counter incremented alongside the existing
+  `PULL_FAILED_IMAGE` map-set in the per-image pull loop. Every step
+  (`mkdir -p`, the `jq` build, the append, the `mktemp`+trim+`mv`) is
+  best-effort — a failure anywhere just `return 0`s, matching the
+  self-upgrade cooldown cache's own philosophy elsewhere in this script;
+  `HAD_ERRORS`/the exit code are never affected.
+  **Tested**: `tests/test-container-upgrader.sh` extracts the function's
+  exact source from the real script file (`sed` between its definition and
+  closing brace, then `eval`) rather than stubbing `docker`/`podman` through
+  the whole container lifecycle just to reach the report phase — a
+  deliberate, narrower exception to `interface-configurator`'s fully
+  black-box convention, justified because this function's only real
+  dependency is `jq`. Covers: correct JSON shape/field values, ISO-8601
+  `Z`-suffixed `date`, multi-run append ordering, trimming to
+  `STATE_LOG_MAX_ENTRIES` (keeps the most recent, drops the oldest), and
+  best-effort behavior when the target directory can't be created. Passing
+  under both a modern `bash` and macOS's bundled `bash` 3.2.
+- **Login status banner (1.1.8-dev2)** — see
+  `docs/requirements/implemented/login-status-banner.md`: `status_main`,
+  `register_banner_main`, `unregister_banner_main`, and `resolve_script_path`
+  live in their own `# === Login banner ... begins/ends ===` block, defined
+  right after `usage()` and before the argument-parsing loop (the same
+  "functions must be defined, i.e. that line already executed, before
+  they're called" reason `parse_to_epoch` moved next to them - see the bug
+  below). Dispatched from the top-level flow the same way as
+  `--upgrade-check`/`--upgrade-only`: parsed, combination-validated (new
+  block rejecting `--status`/`--register-banner`/`--unregister-banner`
+  combined with each other or with `--upgrade-check`/`--upgrade-only`),
+  then dispatched *before* `upgrade_main` and before engine auto-detect/the
+  `jq`-for-engine check - `--status` in particular must work with neither
+  docker/podman nor a network reachable, since it's meant to run
+  unattended on every login.
+  - `status_main`: `command -v jq` gate, then reads `STATE_LOG_FILE`'s last
+    line (`tail -n1`), validates it's real JSON (`jq -e .`), sums
+    `containers_not_uptodate + containers_update_failed` for the
+    "awaiting upgrade" line, otherwise diffs `parse_to_epoch` of the
+    entry's `date` against `date -u +%s` for the staleness line against
+    `STATUS_STALE_DAYS`. Every failure path (`jq` missing, no log, bad
+    JSON, unparseable date) is a silent `exit 0` - never stderr noise, never
+    a non-zero exit, since this is meant to run unattended on every login.
+  - `resolve_script_path`: `cd "$(dirname "$SCRIPT_PATH")" && pwd` +
+    `basename` - the generated MOTD script needs an absolute path since it
+    runs from an unknown CWD at login time; shares the pre-existing
+    assumption that `$0`/`SCRIPT_PATH` is a real path (not a bare
+    PATH-looked-up command name), same as the self-upgrade subsystem
+    already assumes elsewhere.
+  - `register_banner_main`: `$EUID -eq 0` gate, target user
+    `${SUDO_USER:-$(id -un)}`, writes `${MOTD_DIR}/${MOTD_SCRIPT_NAME}`
+    (`/etc/update-motd.d/92-container-upgrader`) with the `MOTD_MARKER`
+    comment plus a `su - <user> -c '<path> --status'` line - both the
+    username and the `<path> --status` command string go through
+    `printf '%q'`, so either containing spaces/shell metacharacters can't
+    break the generated script. Verified live (see below) that `printf
+    '%q'`'s backslash-escaped-space form for the combined `<path>
+    --status` string is parsed by bash as a single argument to `-c`,
+    exactly what `su -c` expects (one command-line string, which `su`
+    itself then splits) - confirmed via a plain argv-printing script
+    rather than assuming it.
+  - `--status-stale-days` handling (1.1.8-dev3): the parse case also sets
+    `STATUS_STALE_DAYS_EXPLICIT=true` (same pattern as `ENGINE_EXPLICIT`),
+    and the login-banner combination-validation block rejects an explicit
+    value unless `STATUS` or `REGISTER_BANNER` is set. `register_banner_main`
+    appends ` --status-stale-days $STATUS_STALE_DAYS` to the command string
+    it embeds in the generated MOTD script when the flag was explicit, before
+    the `printf '%q'` quoting. Covered by unit tests (generated line with and
+    without the flag) and live checks of the combination errors.
+  - `unregister_banner_main`: no-ops cleanly if the file doesn't exist;
+    refuses to remove it (error, exit 1) if it exists but lacks
+    `MOTD_MARKER` (`grep -qF`), so it can never delete a file it didn't
+    generate itself.
+  - **Real bug found live**: `status_main` calls `parse_to_epoch`
+    (previously defined much later in the file, alongside the other
+    container-inspection helpers it was originally added for). Since a
+    bash function must be *defined* - its `name() { ... }` line actually
+    executed - before it's called, not merely appear later in the file,
+    and `status_main` is dispatched earlier in the top-level flow than
+    that definition was reached, every call silently failed ("command not
+    found", swallowed by the existing `2>/dev/null`), so `--status` never
+    printed the "last upgraded N days ago" line at all - caught by live
+    testing across all five `--status` scenarios (no log, awaiting-upgrade,
+    stale, fresh, custom `--status-stale-days`), not by the unit tests
+    alone. Fixed by relocating `parse_to_epoch`'s definition to right
+    before `status_main`; its original caller
+    (`check_recent_restart_or_stuck`, defined much later) is unaffected,
+    since bash functions only need to be defined before they're *called*,
+    not textually near their call site.
+  - **Verified live**: all three flags exercised directly (not just unit
+    tests) - `--status` across all five scenarios above (including on
+    both a fresh macOS/BSD `date` and confirming `parse_to_epoch`'s
+    GNU-then-BSD fallback actually parses this log's exact
+    `date -u '+%Y-%m-%dT%H:%M:%SZ'` format correctly on this machine);
+    `--register-banner`/`--unregister-banner` against a sandboxed
+    `MOTD_DIR` (real `/etc/update-motd.d/` requires root and isn't
+    something this session can safely touch) with the `$EUID` check
+    patched for the test only - covering the non-root refusal, a
+    successful register (correct generated content, target user, `chmod
+    755`), unregister removing it, unregister no-op when already absent,
+    and unregister refusing to delete a file without `MOTD_MARKER`.

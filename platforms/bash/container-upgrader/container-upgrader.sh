@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.7
+# Version: 1.1.8-dev3
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,58 +14,30 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.7 - adds manual systemd-unit-
-#           managed restart support: a container can now opt into the same
-#           systemctl-based restart Podman Quadlet gets automatically, via a
-#           manual `systemd.unit` label (checked before PODMAN_SYSTEMD_UNIT).
-#           Restart scope (--user vs. system) is now resolved per container
-#           via a new `systemd.scope` label plus engine rootless/rootful
-#           introspection (`podman`/`docker info`), fixing a latent gap in
-#           the existing Quadlet path too - it previously hardcoded --user
-#           unconditionally, correct only for the common rootless case.
-#           Three new outcomes (systemd_unit_scope_mismatch/_not_found/
-#           _permission_denied) leave a container fully untouched - no
-#           systemctl attempt, no fallback to simple/safe - whenever the
-#           script already knows in advance that it cannot safely restart it
-#           via systemd. New `--skip-manual-unit-restart`/
-#           `--skip-systemd-restart` options; `--skip-quadlet-restart` is
-#           unchanged but now scoped to only the PODMAN_SYSTEMD_UNIT trigger.
-#           Fixed: get_run_command diffed workdir/env/labels/entrypoint/cmd
-#           against the NEW (already-pulled) image instead of the ORIGINAL
-#           one the container was created from, so a value only ever
-#           inherited from the old image's own default (never explicitly
-#           set) looked like an override and got pinned forward - e.g. a
-#           container that never set --entrypoint could get recreated with
-#           `--entrypoint <old image's entrypoint path>`, which fails to
-#           start if that path doesn't exist in the new image. Now diffed
-#           against the original image; the safe-mode config check
-#           (normalized_config) was updated the same way so a legitimately
-#           inherited new-image default no longer looks like drift and
-#           triggers a spurious rollback.
-#           Fixed: image-pull failures were logged to a fixed, predictable
-#           /tmp/pull_output.log shared across every user and run, which
-#           could fail outright with "Permission denied" if a prior run
-#           left it owned by another user, and was a symlink-race risk in
-#           world-writable /tmp besides. Each pull now logs to its own
-#           mktemp-generated file, reported by its actual path in the
-#           failure message.
-#           Fixed: the AutoRemove(--rm)-driven safe->simple mode downgrade
-#           was announced and applied unconditionally, before it was known
-#           whether a systemd-unit restart (checked first, and bypassing
-#           this script's own stop/remove/run entirely) would even be
-#           attempted - so a container that ended up restarted cleanly via
-#           systemd still logged a "Using simple mode... instead" message
-#           that was never actually relevant. The downgrade is now
-#           deferred: it's logged immediately only when no systemd unit is
-#           in play, and otherwise only if the systemd-unit restart is
-#           attempted and fails, at the point the script actually falls
-#           back to its own simple/safe restart path.
+#   1.1.8 (in progress - currently 1.1.8-dev3) - adds a self-managed run
+#           summary log: every real run appends one JSON-lines entry (date,
+#           version, mode, image/container up-to-date/success/failure
+#           counts) to $XDG_STATE_HOME/scripts-state/bash_container-
+#           upgrader.log, trimmed to the most recent 50 entries -
+#           independent of cron/syslog/journald, none of which are
+#           guaranteed present on every platform this script targets. See
+#           docs/requirements/implemented/run-summary-log.md.
+#           Adds a login status banner on top of that log: new --status
+#           (prints one line - awaiting-upgrade count, or days since last
+#           clean run past --status-stale-days) plus --register-banner/
+#           --unregister-banner to install/remove a /etc/update-motd.d/
+#           script (Ubuntu/Debian dynamic MOTD) that runs --status as
+#           whoever registered it, on every login (--status-stale-days
+#           is valid only with --status/--register-banner, and is carried
+#           into the generated banner). See
+#           docs/requirements/implemented/login-status-banner.md.
+#   1.1.7 - adds manual systemd-unit-managed restart support (opt in via a
+#           `systemd.unit` label, with per-container scope resolution) plus
+#           three related bug fixes; see CHANGELOG.md for detail.
 #   1.1.6 - implements the repo-wide maintenance conventions from
 #           script-maintenance-convention.md (layered --help, CHANGELOG.md,
 #           the numbered-suffix versioning scheme) plus several real bugs
 #           found and fixed along the way; see CHANGELOG.md for detail.
-#   1.1.5 - --help visually separates this script's own options from the
-#           self-upgrade options under two labeled groups.
 # HELP:IDENTITY:END
 #
 # HELP:INTRO:BEGIN
@@ -220,6 +192,24 @@
 #                        diff you've already verified is harmless.
 #   --dry-run           Show what would happen, take no action, and skip
 #                        the health-outcome summary (nothing was run).
+#   --status             Print at most one line from the run summary log
+#                        ("N container(s) are awaiting upgrade." or
+#                        "Containers were last upgraded N day(s) ago.") and
+#                        exit - no self-upgrade check, no engine/jq
+#                        dependency, safe to run unattended. See
+#                        --register-banner. Default stale threshold: 3 days.
+#   --status-stale-days N  Days since the last run before --status prints
+#                        the "last upgraded N day(s) ago" line. Default: 3.
+#                        Only valid with --status or --register-banner
+#                        (an error otherwise); with --register-banner it is
+#                        carried into the generated login-banner script.
+#   --register-banner    Install a /etc/update-motd.d/ script (Ubuntu/
+#                        Debian dynamic MOTD) that runs --status as
+#                        whoever invoked this (via sudo) or the current
+#                        user, so it shows automatically on every login to
+#                        this host. Requires root. Idempotent.
+#   --unregister-banner  Remove the script --register-banner installed.
+#                        Requires root.
 # HELP:CORE-OPTIONS:END
 #
 # HELP:UPGRADE-OPTIONS:BEGIN
@@ -279,6 +269,18 @@
 # are printed in red/bold when the terminal supports color. If any
 # occurred, the very last line of output is "ERRORS OCCURRED - REVIEW
 # THE OUTPUT" in caps, also colored.
+#
+# Run summary log: every real run (not --dry-run/--upgrade-check/
+# --upgrade-only) appends one JSON-lines entry - date, version, mode, and
+# image/container up-to-date/success/failure counts - to
+# $XDG_STATE_HOME/scripts-state/bash_container-upgrader.log (default
+# ~/.local/state/scripts-state/bash_container-upgrader.log), trimmed to the
+# most recent 50 entries. Independent of cron/syslog/journald, so it's the
+# reliable way to check when this script last ran and how it went.
+#
+# Login banner: see --status/--register-banner/--unregister-banner above -
+# surfaces the run summary log's latest entry on login (Ubuntu/Debian
+# dynamic MOTD only).
 # HELP:OUTPUT:END
 
 set -uo pipefail
@@ -302,6 +304,11 @@ UPGRADE_TYPE=""
 UPGRADE_LEVEL=""
 UPGRADE_CHECK=false
 UPGRADE_ONLY=false
+STATUS=false
+STATUS_STALE_DAYS=3
+STATUS_STALE_DAYS_EXPLICIT=false
+REGISTER_BANNER=false
+UNREGISTER_BANNER=false
 TARGETS=()
 
 # Version lives only in the header comment above (line 2: "# Version: X.Y.Z"
@@ -327,6 +334,25 @@ UPGRADE_REPO="scripts"
 UPGRADE_TIMEOUT=10
 UPGRADE_COOLDOWN_SECONDS=1200
 UPGRADE_BANNER_NOTE=""
+
+# Run summary log (docs/requirements/generic conventions don't cover this -
+# see platforms/bash/container-upgrader/docs/requirements/implemented/
+# run-summary-log.md): a small, self-managed, append-only record of what
+# happened on each real run, independent of cron/syslog/journald, none of
+# which are guaranteed present on every platform this script targets.
+# XDG_STATE_HOME (not XDG_CACHE_HOME, unlike the self-upgrade cooldown cache
+# below) since this is a meaningful record, not disposable cache.
+STATE_LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/${SCRIPT_LANG}_${SCRIPT_NAME}.log"
+STATE_LOG_MAX_ENTRIES=50
+
+# Login banner (docs/requirements/implemented/login-status-banner.md): a
+# generated /etc/update-motd.d/ script that runs `--status` as whichever
+# user registered it, so the run summary log above shows up automatically
+# on every SSH/terminal login on that host - Ubuntu/Debian's dynamic MOTD
+# mechanism (pam_motd), not a generic cross-distro facility.
+MOTD_DIR="/etc/update-motd.d"
+MOTD_SCRIPT_NAME="92-container-upgrader"
+MOTD_MARKER="# Auto-generated by container-upgrader.sh --register-banner"
 
 # Color support: only enable if stderr (where log()/err() write) is an
 # actual terminal that reports at least 8 colors. Falls back to plain
@@ -1442,6 +1468,140 @@ usage() {
   exit 1
 }
 
+# Parses an RFC3339 timestamp (as reported by Docker/Podman, e.g.
+# "2026-09-05T04:20:59.123456789Z", or this script's own run-summary-log
+# ISO-Z timestamps) into a Unix epoch. Tries GNU date first, then falls
+# back to BSD/macOS date syntax for portability. Defined here (rather than
+# down with the rest of the container-inspection helpers that also use it)
+# because status_main below - part of the login-banner subsystem, called
+# from the top-level flow before any container-engine code runs - needs it
+# too, and a function must be *defined* (i.e. that line already executed)
+# before it's called, not merely appear later in the file.
+parse_to_epoch() {
+  local ts="$1" epoch
+  epoch=$(date -u -d "$ts" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
+  epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "${ts%%.*}" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
+  return 1
+}
+
+# =============================================================================
+# Login banner (docs/requirements/implemented/login-status-banner.md) begins -
+# every function down to the matching "ends" banner belongs to this
+# subsystem; nothing here is container-upgrader domain logic.
+# =============================================================================
+
+# --status: reads the run summary log's most recent entry and prints at most
+# one line - never an error, even if there's nothing to report, since this
+# is meant to run unattended on every login (see register_banner_main
+# below). Always exits 0.
+status_main() {
+  if ! command -v jq >/dev/null 2>&1; then
+    exit 0
+  fi
+  local last
+  last=$(tail -n1 "$STATE_LOG_FILE" 2>/dev/null)
+  [[ -z "$last" ]] && exit 0
+  echo "$last" | jq -e . >/dev/null 2>&1 || exit 0
+
+  local not_ok
+  not_ok=$(echo "$last" | jq '(.containers_not_uptodate // 0) + (.containers_update_failed // 0)' 2>/dev/null)
+  [[ "$not_ok" =~ ^[0-9]+$ ]] || exit 0
+
+  if [[ "$not_ok" -gt 0 ]]; then
+    echo "$not_ok container(s) are awaiting upgrade."
+    exit 0
+  fi
+
+  local entry_date entry_epoch now_epoch days
+  entry_date=$(echo "$last" | jq -r '.date' 2>/dev/null)
+  entry_epoch=$(parse_to_epoch "$entry_date" 2>/dev/null)
+  [[ -z "$entry_epoch" ]] && exit 0
+  now_epoch=$(date -u +%s)
+  days=$(( (now_epoch - entry_epoch) / 86400 ))
+  if [[ "$days" -ge "$STATUS_STALE_DAYS" ]]; then
+    echo "Containers were last upgraded ${days} day(s) ago."
+  fi
+  exit 0
+}
+
+# Resolves this script's own absolute path, for embedding into the
+# generated MOTD script below (which runs from an unknown CWD at login
+# time, so a relative $0 wouldn't work there). Shares the same "$0 is a
+# real path, not a PATH-looked-up bare command" assumption the self-upgrade
+# subsystem's own SCRIPT_PATH already relies on elsewhere in this script.
+resolve_script_path() {
+  local dir
+  dir=$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)
+  [[ -z "$dir" ]] && return 1
+  printf '%s/%s' "$dir" "$(basename "$SCRIPT_PATH")"
+}
+
+# --register-banner: installs a small /etc/update-motd.d/ script that runs
+# `--status` as whichever user registered it (see MOTD_DIR/MOTD_SCRIPT_NAME/
+# MOTD_MARKER above) - Ubuntu/Debian's dynamic MOTD (pam_motd), not a
+# generic cross-distro facility. Idempotent: re-running regenerates it.
+register_banner_main() {
+  if [[ "$EUID" -ne 0 ]]; then
+    err "--register-banner must be run as root (e.g. via sudo)."
+    exit 1
+  fi
+  local target_user
+  target_user="${SUDO_USER:-$(id -un)}"
+  local abs_path
+  if ! abs_path=$(resolve_script_path); then
+    err "--register-banner: could not resolve this script's own absolute path."
+    exit 1
+  fi
+  local status_cmd="${abs_path} --status"
+  # A --status-stale-days given alongside --register-banner carries through
+  # to the generated banner, so the same threshold applies at login time -
+  # --status itself always runs with no flags at login, so without this it
+  # would silently fall back to STATUS_STALE_DAYS's own default (3).
+  if [[ "$STATUS_STALE_DAYS_EXPLICIT" == "true" ]]; then
+    status_cmd="${status_cmd} --status-stale-days ${STATUS_STALE_DAYS}"
+  fi
+  mkdir -p "$MOTD_DIR" 2>/dev/null
+  local motd_file="${MOTD_DIR}/${MOTD_SCRIPT_NAME}"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '%s for "%s" - do not edit by hand.\n' "$MOTD_MARKER" "$target_user"
+    printf '# Re-run --register-banner to regenerate, or --unregister-banner to remove.\n'
+    printf 'su - %q -c %q 2>/dev/null\n' "$target_user" "$status_cmd"
+  } > "$motd_file" 2>/dev/null
+  if [[ ! -f "$motd_file" ]]; then
+    err "--register-banner: could not write $motd_file"
+    exit 1
+  fi
+  chmod 755 "$motd_file" 2>/dev/null
+  log "Registered login banner for user '$target_user' at $motd_file"
+  exit 0
+}
+
+# --unregister-banner: removes the file register_banner_main wrote, but
+# only if it still carries MOTD_MARKER - never deletes an unrelated file
+# someone else placed at the same path (e.g. manually replaced it).
+unregister_banner_main() {
+  if [[ "$EUID" -ne 0 ]]; then
+    err "--unregister-banner must be run as root (e.g. via sudo)."
+    exit 1
+  fi
+  local motd_file="${MOTD_DIR}/${MOTD_SCRIPT_NAME}"
+  if [[ ! -f "$motd_file" ]]; then
+    log "Login banner not registered ($motd_file does not exist). Nothing to do."
+    exit 0
+  fi
+  if ! grep -qF "$MOTD_MARKER" "$motd_file" 2>/dev/null; then
+    err "--unregister-banner: $motd_file exists but wasn't generated by --register-banner (no marker comment found) - not removing it. Delete it manually if you're sure."
+    exit 1
+  fi
+  rm -f "$motd_file"
+  log "Removed login banner at $motd_file"
+  exit 0
+}
+# =============================================================================
+# Login banner ends
+# =============================================================================
+
 # Captured before the parsing loop below consumes "$@", so upgrade_main can
 # forward the original arguments unchanged to a trial-run child process.
 ORIGINAL_ARGS=("$@")
@@ -1470,6 +1630,15 @@ while [[ $# -gt 0 ]]; do
       shift 2 ;;
     --upgrade-check) UPGRADE_CHECK=true; shift ;;
     --upgrade-only) UPGRADE_ONLY=true; shift ;;
+    # ------------------------------------------------------------------------
+    # --- login banner: flags (see MOTD_DIR/MOTD_SCRIPT_NAME above) ---------
+    --status) STATUS=true; shift ;;
+    --status-stale-days)
+      STATUS_STALE_DAYS="${2:-}"
+      STATUS_STALE_DAYS_EXPLICIT=true
+      shift 2 ;;
+    --register-banner) REGISTER_BANNER=true; shift ;;
+    --unregister-banner) UNREGISTER_BANNER=true; shift ;;
     # ------------------------------------------------------------------------
     --mode)
       MODE="${2:-}"
@@ -1525,11 +1694,40 @@ if [[ "$UPGRADE_CHECK" == "true" && -n "$UPGRADE_TYPE" ]]; then
   err "--upgrade-check cannot be combined with --upgrade-type"; exit 1
 fi
 
+# --- login banner: flag-combination validation ------------------------------
+# --status/--register-banner/--unregister-banner are one-shot administrative
+# actions, mutually exclusive with each other and with --upgrade-check/
+# --upgrade-only (also one-shot).
+_banner_flags_set=0
+$STATUS && _banner_flags_set=$((_banner_flags_set + 1))
+$REGISTER_BANNER && _banner_flags_set=$((_banner_flags_set + 1))
+$UNREGISTER_BANNER && _banner_flags_set=$((_banner_flags_set + 1))
+if [[ "$_banner_flags_set" -gt 1 ]]; then
+  err "--status, --register-banner, and --unregister-banner cannot be combined with each other"
+  exit 1
+fi
+if [[ "$_banner_flags_set" -gt 0 ]] && { [[ "$UPGRADE_CHECK" == "true" ]] || [[ "$UPGRADE_ONLY" == "true" ]]; }; then
+  err "--status/--register-banner/--unregister-banner cannot be combined with --upgrade-check/--upgrade-only"
+  exit 1
+fi
+if [[ "$STATUS_STALE_DAYS_EXPLICIT" == "true" ]] && ! $STATUS && ! $REGISTER_BANNER; then
+  err "--status-stale-days can only be combined with --status or --register-banner"
+  exit 1
+fi
+unset _banner_flags_set
+
 # --- self-upgrade: --upgrade-check / --upgrade-only exit before any --------
 # container-engine work; see sections 11-12. Neither ever reaches the
 # script's normal container-upgrader logic below.
 [[ "$UPGRADE_CHECK" == "true" ]] && upgrade_check_main
 [[ "$UPGRADE_ONLY" == "true" ]] && upgrade_only_main
+
+# --- login banner: --status/--register-banner/--unregister-banner exit -----
+# before any container-engine work or self-upgrade check (--status implies
+# --no-autoupdate-like behavior - it never reaches upgrade_main below).
+[[ "$STATUS" == "true" ]] && status_main
+[[ "$REGISTER_BANNER" == "true" ]] && register_banner_main
+[[ "$UNREGISTER_BANNER" == "true" ]] && unregister_banner_main
 
 # --- self-upgrade: ordinary flow (section 8) --------------------------------
 # Runs before any container-engine work. On a successful trial run this
@@ -1901,16 +2099,6 @@ detect_external_restart() {
     fi
   done
   echo ""
-}
-
-# Parses an RFC3339 timestamp (as reported by Docker/Podman, e.g.
-# "2026-09-05T04:20:59.123456789Z") into a Unix epoch. Tries GNU date
-# first, then falls back to BSD/macOS date syntax for portability.
-parse_to_epoch() {
-  local ts="$1" epoch
-  epoch=$(date -u -d "$ts" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
-  epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "${ts%%.*}" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
-  return 1
 }
 
 # Fast, no-wait check using data Docker/Podman already track - no polling
@@ -2450,6 +2638,7 @@ log "Engine: $ENGINE | Mode: $MODE | Timeout: ${TIMEOUT}s | Precheck: ${PRECHECK
 ATTEMPTED_ORDER=()
 IMAGES_UPGRADED=()
 RESTART_POLICY_ISSUES=()
+IMAGES_PULL_FAILED_COUNT=0
 
 # --- Phase 1: snapshot each container's image and current image id -------
 for name in "${CONTAINERS[@]}"; do
@@ -2505,6 +2694,7 @@ for image in "${UNIQUE_IMAGES[@]}"; do
   if ! $ENGINE pull "$image" >"$pull_log" 2>&1; then
     err "  Pull failed for $image. Containers using it will be marked pull_failed. See $pull_log"
     map_set PULL_FAILED_IMAGE "$image" true
+    IMAGES_PULL_FAILED_COUNT=$((IMAGES_PULL_FAILED_COUNT + 1))
     continue
   fi
   rm -f "$pull_log"
@@ -2798,6 +2988,48 @@ for name in "${ATTEMPTED_ORDER[@]+"${ATTEMPTED_ORDER[@]}"}"; do
     systemd_unit_permission_denied) count_systemd_unit_permission_denied=$((count_systemd_unit_permission_denied + 1)) ;;
   esac
 done
+
+# Appends one JSON-lines entry to STATE_LOG_FILE summarizing this run, then
+# trims the file to its most recent STATE_LOG_MAX_ENTRIES lines - see
+# docs/requirements/implemented/run-summary-log.md. Best-effort throughout
+# (matching the self-upgrade cache's own philosophy elsewhere in this
+# script): a failure at any step here never affects HAD_ERRORS or this
+# run's own exit code, since this log is a convenience, not this script's
+# actual job.
+write_run_state_log() {
+  local not_uptodate="$1" images_ok="$2" images_failed="$3" containers_ok="$4" containers_failed="$5"
+  local dir entry tmp
+  dir=$(dirname "$STATE_LOG_FILE")
+  mkdir -p "$dir" 2>/dev/null || return 0
+  entry=$(jq -c -n \
+    --arg date "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg version "$SCRIPT_VERSION" \
+    --arg mode "$MODE" \
+    --argjson containers_not_uptodate "$not_uptodate" \
+    --argjson images_updated_successfully "$images_ok" \
+    --argjson images_update_failed "$images_failed" \
+    --argjson containers_updated_successfully "$containers_ok" \
+    --argjson containers_update_failed "$containers_failed" \
+    '{date: $date, version: $version, mode: $mode,
+      containers_not_uptodate: $containers_not_uptodate,
+      images_updated_successfully: $images_updated_successfully,
+      images_update_failed: $images_update_failed,
+      containers_updated_successfully: $containers_updated_successfully,
+      containers_update_failed: $containers_update_failed}' 2>/dev/null) || return 0
+  echo "$entry" >> "$STATE_LOG_FILE" 2>/dev/null || return 0
+  tmp=$(mktemp "${STATE_LOG_FILE}.XXXXXX" 2>/dev/null) || return 0
+  if tail -n "$STATE_LOG_MAX_ENTRIES" "$STATE_LOG_FILE" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$STATE_LOG_FILE" 2>/dev/null
+  fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+write_run_state_log \
+  "$((count_pull_failed + count_systemd_unit_scope_mismatch + count_systemd_unit_not_found + count_systemd_unit_permission_denied + count_skipped_crashing))" \
+  "${#IMAGES_UPGRADED[@]}" \
+  "$IMAGES_PULL_FAILED_COUNT" \
+  "$((count_upgraded + count_recovered + count_upgraded_externally + count_upgraded_via_quadlet + count_upgraded_via_manual_unit))" \
+  "$((count_rolled_back_working + count_now_failing + count_still_failing + count_reconstruct_failed + count_reverted_externally + count_external_config_discrepancy))"
 
 log "Images upgraded: ${#IMAGES_UPGRADED[@]}"
 log "Containers upgraded successfully (image changed): $count_upgraded"

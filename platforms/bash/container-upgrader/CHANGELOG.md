@@ -12,6 +12,80 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.8-dev3
+Tightens `--status-stale-days` (see
+[login-status-banner.md](requirements/implemented/login-status-banner.md)):
+
+- Passing it without `--status` or `--register-banner` (a normal run,
+  `--unregister-banner`, `--upgrade-check`, `--upgrade-only`) is now an
+  error, instead of being silently ignored. Tracked via a new
+  `STATUS_STALE_DAYS_EXPLICIT` flag so an explicit value is distinguishable
+  from the default.
+- Passing it together with `--register-banner` now carries it into the
+  generated `/etc/update-motd.d/` script (`--status --status-stale-days N`),
+  so the chosen threshold applies at login time; previously the banner
+  always ran plain `--status` and reverted to the default 3 days.
+
+## 1.1.8-dev2
+Adds a login status banner
+([docs/requirements/implemented/login-status-banner.md](requirements/implemented/login-status-banner.md)),
+layered on top of `1.1.8-dev1`'s run summary log:
+
+- **`--status`** — an early-exit mode (no self-upgrade check, no
+  docker/podman or engine dependency at all) that reads the run-summary-
+  log's most recent entry and prints at most one line: `"N container(s)
+  are awaiting upgrade."` if `containers_not_uptodate +
+  containers_update_failed > 0`, else `"Containers were last upgraded N
+  day(s) ago."` if at least `--status-stale-days` (default `3`) days have
+  passed since that entry, else nothing. Never errors or exits non-zero,
+  even with no log yet — designed to run unattended on every login.
+- **`--status-stale-days N`** — the threshold above. A separate explicit
+  option, consistent with this script's existing numeric flags
+  (`--timeout N`, `--precheck-seconds N`, etc.), not a value taken
+  directly by `--status`.
+- **`--register-banner`** / **`--unregister-banner`** — install/remove a
+  `/etc/update-motd.d/92-container-upgrader` script (Ubuntu/Debian's
+  dynamic MOTD mechanism) that runs `--status` as whoever invoked
+  `--register-banner` (via `sudo`, or directly as root) — that user is
+  baked into the generated script at registration time, not detected
+  dynamically per login. Both require root; `--unregister-banner` refuses
+  to remove the file if it doesn't carry the marker comment
+  `--register-banner` writes (won't clobber an unrelated file at the same
+  path). Idempotent — re-registering overwrites cleanly.
+
+Also fixes a real bug caught by live testing during this work:
+`parse_to_epoch` (used by `--status` for the staleness calculation) was
+defined much later in the file than `--status`'s own dispatch point in the
+top-level flow — since a bash function must be *defined* (its `name() {
+...}` line actually executed) before it's called, not merely appear later
+in the file, every call silently failed (`2>/dev/null` swallowed the
+resulting "command not found"), and `--status` never printed the
+"last upgraded N days ago" line at all. Fixed by moving `parse_to_epoch`'s
+definition earlier, alongside the other login-banner functions; its
+original caller (`check_recent_restart_or_stuck`, defined much later)
+is unaffected since bash function definitions don't need to be textually
+close to their call sites, only to execute before them.
+
+## 1.1.8-dev1
+Adds a self-managed run summary log
+([docs/requirements/implemented/run-summary-log.md](requirements/implemented/run-summary-log.md)):
+every real run (not `--dry-run`/`--upgrade-check`/`--upgrade-only`) now
+appends one JSON-lines entry to
+`${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/bash_container-upgrader.log`
+— `date` (ISO-8601 UTC), `version`, `mode`, and five counts
+(`containers_not_uptodate`, `images_updated_successfully`,
+`images_update_failed`, `containers_updated_successfully`,
+`containers_update_failed`), derived from the existing `RESULT` outcome
+tally so every one of the script's 17 outcome statuses is accounted for in
+exactly one of the three container counters. The file is trimmed to its
+most recent 50 entries after every append. Written independent of any OS
+logging facility, cron, or systemd unit — none of those are guaranteed
+present across the platforms this script targets (macOS's unified log has
+no Linux equivalent; a Linux syslog daemon or `systemd-journald` isn't
+guaranteed installed either, especially on minimal container-host distros).
+All writes are best-effort and never affect the run's own exit code or
+`HAD_ERRORS`.
+
 ## 1.1.7
 Adds manual systemd-unit-managed restart support and fixes three related
 bugs found along the way. Consolidates `1.1.7-dev1` through `1.1.7-dev4`
