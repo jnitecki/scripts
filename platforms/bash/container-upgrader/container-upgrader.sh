@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.7-dev4
+# Version: 1.1.7
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.7 (in progress - currently 1.1.7-dev4) - adds manual systemd-unit-
+#   1.1.7 - adds manual systemd-unit-
 #           managed restart support: a container can now opt into the same
 #           systemctl-based restart Podman Quadlet gets automatically, via a
 #           manual `systemd.unit` label (checked before PODMAN_SYSTEMD_UNIT).

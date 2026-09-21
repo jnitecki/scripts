@@ -12,6 +12,48 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.7
+Adds manual systemd-unit-managed restart support and fixes three related
+bugs found along the way. Consolidates `1.1.7-dev1` through `1.1.7-dev4`
+below into one summary:
+
+1. A container can now opt into the same `systemctl`-based restart Podman
+   Quadlet gets automatically, via a manual `systemd.unit` label (checked
+   before `PODMAN_SYSTEMD_UNIT`). Restart scope (`--user` vs. system) is
+   now resolved per container via a new `systemd.scope` label plus engine
+   rootless/rootful introspection (`podman`/`docker info`) and a
+   unit-file-existence check, in place of the previous hardcoded `--user`,
+   fixing a latent gap in the existing Quadlet path too (a rootful/system
+   Quadlet setup was silently broken before this). Three new outcomes
+   (`systemd_unit_scope_mismatch`, `systemd_unit_not_found`,
+   `systemd_unit_permission_denied`) leave a container fully untouched
+   whenever the script already knows in advance it cannot safely restart it
+   via systemd. New `--skip-manual-unit-restart`/`--skip-systemd-restart`
+   options; `--skip-quadlet-restart` is unchanged but now scoped to only
+   the `PODMAN_SYSTEMD_UNIT` trigger.
+2. Fixed `get_run_command()` diffing an upgraded container's config against
+   the newly-pulled image instead of the original one it was created from,
+   which could pin a value the container never explicitly set (e.g.
+   `--entrypoint`) forward from the old image - failing to start outright
+   if that value doesn't exist in the new image. Now diffed against the
+   original image; the safe-mode `normalized_config()` check was updated
+   the same way to avoid a matching spurious rollback.
+3. Fixed image-pull failures logging to a fixed, world-writable
+   `/tmp/pull_output.log` shared across every user and run, which could
+   itself fail with "Permission denied" depending on which user's run
+   created it first, and was a symlink-race risk besides. Each pull now
+   logs to its own `mktemp`-generated file, reported by its real path in
+   the failure message.
+4. Fixed the AutoRemove(`--rm`)-driven safe->simple mode downgrade being
+   announced unconditionally before it was known whether a systemd-unit
+   restart would be attempted first, so a container restarted cleanly via
+   systemd still logged an irrelevant "Using simple mode... instead"
+   message. The downgrade log is now deferred until the script actually
+   falls back to its own restart path.
+
+See the individual `1.1.7-dev1` through `1.1.7-dev4` entries below for the
+exact per-bump breakdown and any additional detail not repeated above.
+
 ## 1.1.7-dev4
 Fixes misleading log output when a container ends up restarted via a
 systemd unit (Quadlet or a manual `systemd.unit` label): the
