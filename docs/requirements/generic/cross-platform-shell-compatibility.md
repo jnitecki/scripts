@@ -9,6 +9,18 @@ which have their own, separate portability concerns.
 Every shell script must run correctly on both Linux and macOS. The two
 platforms differ in ways that silently break naive bash scripts:
 
+### 0. Carve-out: scripts that inherently solve an OS-specific problem
+This requirement assumes the script's *purpose* is itself platform-neutral
+(the goal doesn't care whether it runs on Linux or macOS, only the
+implementation details do). It does not apply to a script whose purpose is
+inherently tied to a facility that exists on only one platform (e.g.
+systemd/udev integration, which has no macOS equivalent) — such a script
+may be written for that platform only. It must still fail fast with a
+clear error naming the missing platform-specific requirement when run
+elsewhere, rather than attempting partial/undefined behavior, per the
+bash-4+ fail-fast pattern below. See
+[[interface-configurator]] for the first script using this carve-out.
+
 ### 1. Bash version
 - macOS ships bash 3.2 as `/bin/bash` (Apple has not updated it since,
   because 3.2 is the last GPLv2 release; later bash is GPLv3). Linux

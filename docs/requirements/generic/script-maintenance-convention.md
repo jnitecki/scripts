@@ -133,6 +133,29 @@ unnumbered) with a trailing revision number:
   digits as part of the *number*, not the level name, when determining a
   version's level — `1.2.3-dev7`'s level is `dev`, not `dev7`.
 
+### Bootstrapping a brand-new script's first version
+The bullets above define how to bump *from* an existing `Version:` header;
+they don't by themselves say what a script that doesn't have one yet
+starts at. A script that has no prior `Version:` header at all is treated
+as if it were already at the implicit baseline `0.0.0` — not a real,
+written version, just the "nothing here yet" state the increment rule
+above bumps forward from like any other bare version. Applying the
+existing **bare version** bullet to that baseline gives the script's actual
+first `Version:` line: `0.0.1-dev1`. A script's very first commit is
+therefore never a stable version — like every later change, it passes
+through its own dev/alpha/beta/rc pre-release cycle first, and promoting
+it to a stable release (e.g. `0.1.0`, `1.0.0` — the specific `X.Y.Z` to
+release at is a separate judgment call, not fixed by this rule) is the
+same deliberate, explicit action described above for any other pre-release
+cycle, not something that happens automatically or on the first commit.
+
+This bootstrap rule is forward-looking only — it does not retroactively
+apply to a script that already has real version history predating this
+section (both scripts in the repo as of this writing, `container-
+upgrader.sh` and `interface-configurator.sh`, began at a stable `1.0.0`
+with no prior pre-release cycle, under the previously-unwritten practice
+this section formalizes and changes).
+
 ### Version ordering with numbered suffixes
 Extends [[script-upgrade-convention]] sections 3-4's version comparison. Two
 versions are compared, in order:
@@ -165,6 +188,31 @@ this regex too makes the script fail to parse its own version at all (silent
 fallback to `"unknown"`), which then breaks everything downstream that
 assumes a valid version string. The fix is `(-[a-z]+[0-9]*)?` (letters,
 then optional trailing digits) in place of `(-[a-z]+)?`.
+
+## 5. Test scripts live in a `tests/` subdirectory
+- A script's own directory (`platforms/<lang>/<name>/`) keeps any test
+  script(s) for it, and any fixtures/helpers those tests need, under a
+  `tests/` subdirectory — never loose alongside the script file itself.
+  Only the location changes; the test file's own name keeps this repo's
+  existing `test-<name>.<ext>` naming, so a script's test lives at
+  `platforms/<lang>/<name>/tests/test-<name>.<ext>`.
+- A test script that resolves the script it tests relative to its own
+  location (e.g. bash's `SCRIPT_DIR="$(cd "$(dirname
+  "${BASH_SOURCE[0]}")" && pwd)"`) must account for the extra `tests/`
+  level — the script under test is `"${SCRIPT_DIR}/../<name>.<ext>"` from
+  there, not `"${SCRIPT_DIR}/<name>.<ext>"`.
+- [[script-catalog-generator]] identifies a script by the leaf folder name
+  directly under `platforms/<lang>/`, and scans every recognized-extension
+  file directly inside a script's own folder as a candidate platform
+  variant of it. A test file placed loose in that same folder (this repo's
+  interim approach before this section existed) had to be excluded from
+  that scan by a `test-*.sh` filename-pattern check to avoid being
+  misread as a second, spurious variant. Requiring `tests/` as a real
+  subdirectory replaces that filename-pattern dependency with a structural
+  one: [[script-catalog-generator]] skips anything whose immediate
+  containing directory is named `tests`, regardless of filename or
+  extension, which also correctly covers non-script fixtures/helpers a
+  test might need that a `test-*.sh` filename pattern never would have.
 
 ## Rationale
 These are cross-cutting authoring/process rules discovered while maintaining
@@ -201,7 +249,18 @@ per section 1's own rule, in the bash blueprint first:
   `container-upgrader.sh`. Still has no tooling enforcement; it remains a
   process rule for whoever makes the next self-upgrade change, and for any
   other adopting script once one exists.
+- Section 5 (`tests/` subdirectory): `platforms/bash/interface-configurator/`
+  is the first (and so far only) script this applies to —
+  `test-interface-configurator.sh` moved from that directory into
+  `tests/test-interface-configurator.sh`, with its `SCRIPT_DIR`-relative
+  path to the script under test updated for the extra directory level.
+  `tools/generate-catalog.sh` now skips anything whose immediate
+  containing directory is named `tests` instead of relying on the
+  `test-*.sh` filename check.
 
 Not yet done: no other script in the repo adopts self-upgrade yet, so
 section 1's "replicate to every adopting script" and section 2's `--help`
-layering have only ever been exercised against this one script.
+layering have only ever been exercised against this one script. Section 4's
+bootstrap-baseline addition (`0.0.0` → first real version `0.0.1-dev1`) is
+also not yet done — it's forward-looking per its own text, and no script in
+the repo has been created since it was written, so it has no example yet.

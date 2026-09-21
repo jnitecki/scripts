@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # generate-catalog.sh
-# Version: 2.2.1
+# Version: 2.2.3
+#
+# 2.2.3: a script's test file now lives in a tests/ subdirectory of the
+# script's own folder (docs/requirements/generic/script-maintenance-
+# convention.md section 5) rather than loose alongside the script itself.
+# The 2.2.2 test-*.sh filename-pattern skip is replaced with a directory-
+# based one: anything whose immediate containing directory is named
+# "tests" is skipped, regardless of filename or extension - see the skip
+# check in the main scan loop below.
 #
 # Scans platforms/<lang>/<script-name>/ for script files, reads their header
 # metadata (# Version / # Category / # Description comment lines), and
@@ -193,6 +201,17 @@ while IFS= read -r -d '' relpath; do
     ext="${relpath##*.}"
     label="$(label_for_ext "${ext}")"
     [[ -z "${label}" ]] && continue
+
+    # A script's own test script (and any fixtures/helpers it needs) lives
+    # under a tests/ subdirectory of the script's own platforms/<lang>/
+    # <name>/ folder, per docs/requirements/generic/script-maintenance-
+    # convention.md section 5. Scanning it as if it were another platform
+    # variant of the script it tests would produce a spurious catalog entry
+    # (keyed "tests", the containing directory's basename) or, if it were
+    # loose alongside the script instead, a merge-conflict warning against
+    # the real entry (mismatched Category:/Description:, since a test file
+    # has neither). Skip anything directly under a tests/ directory outright.
+    [[ "$(basename "$(dirname "${relpath}")")" == "tests" ]] && continue
 
     key="$(basename "$(dirname "${relpath}")")"
 

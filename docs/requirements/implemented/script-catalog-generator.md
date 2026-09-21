@@ -18,6 +18,12 @@ variants of the same logical script and merged into one catalog entry.
 Each variant keeps its own independent `Version` — versions may differ
 across platforms for the same script.
 
+Anything whose immediate containing directory is named `tests` is skipped
+outright, regardless of filename or extension — that's where a script's own
+test script and any fixtures/helpers it needs live, per
+[[script-maintenance-convention]] section 5, and none of that is itself a
+platform variant of the script it tests.
+
 ### CATALOG.md (master, root)
 A single stable, low-churn file: a flat table, one row per logical script
 (no `## category` heading grouping), with no links and no version:
