@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.8-dev3
+# Version: 1.1.8
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.8 (in progress - currently 1.1.8-dev3) - adds a self-managed run
+#   1.1.8 - adds a self-managed run
 #           summary log: every real run appends one JSON-lines entry (date,
 #           version, mode, image/container up-to-date/success/failure
 #           counts) to $XDG_STATE_HOME/scripts-state/bash_container-

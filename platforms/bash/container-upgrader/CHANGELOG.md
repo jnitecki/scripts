@@ -12,6 +12,36 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.8
+Adds a self-managed run summary log and a login status banner built on top
+of it. Consolidates `1.1.8-dev1` through `1.1.8-dev3` below into one
+summary:
+
+1. Every real run (not `--dry-run`/`--upgrade-check`/`--upgrade-only`) now
+   appends one JSON-lines entry (date, version, mode, image/container
+   up-to-date/success/failure counts) to
+   `${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/bash_container-upgrader.log`,
+   trimmed to the most recent 50 entries - independent of cron, syslog or
+   journald, none of which are guaranteed present on every platform this
+   script targets. Writes are best-effort and never affect the exit code.
+   See [run-summary-log.md](docs/requirements/implemented/run-summary-log.md).
+2. New `--status` prints at most one line from that log - the
+   awaiting-upgrade count, or the days since the last clean run once past
+   `--status-stale-days` (default `3`) - and never errors, so it can run
+   unattended on every login. New `--register-banner`/`--unregister-banner`
+   install/remove a `/etc/update-motd.d/92-container-upgrader` script
+   (Ubuntu/Debian dynamic MOTD) that runs `--status` as the user who
+   registered it. `--status-stale-days` is valid only with `--status` or
+   `--register-banner` (an error otherwise), and is carried into the
+   generated banner script. See
+   [login-status-banner.md](docs/requirements/implemented/login-status-banner.md).
+3. Fixed `--status` never printing the "last upgraded N days ago" line:
+   `parse_to_epoch` was defined after `--status`'s dispatch point, so every
+   call silently failed; its definition was moved earlier.
+
+See the individual `1.1.8-dev1` through `1.1.8-dev3` entries below for the
+exact per-bump breakdown and any additional detail not repeated above.
+
 ## 1.1.8-dev3
 Tightens `--status-stale-days` (see
 [login-status-banner.md](requirements/implemented/login-status-banner.md)):
