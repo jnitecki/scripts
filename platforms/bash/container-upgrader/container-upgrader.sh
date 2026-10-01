@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.8
+# Version: 1.1.9-dev1
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,30 +14,26 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.8 - adds a self-managed run
-#           summary log: every real run appends one JSON-lines entry (date,
-#           version, mode, image/container up-to-date/success/failure
-#           counts) to $XDG_STATE_HOME/scripts-state/bash_container-
-#           upgrader.log, trimmed to the most recent 50 entries -
-#           independent of cron/syslog/journald, none of which are
-#           guaranteed present on every platform this script targets. See
-#           docs/requirements/implemented/run-summary-log.md.
-#           Adds a login status banner on top of that log: new --status
-#           (prints one line - awaiting-upgrade count, or days since last
-#           clean run past --status-stale-days) plus --register-banner/
-#           --unregister-banner to install/remove a /etc/update-motd.d/
-#           script (Ubuntu/Debian dynamic MOTD) that runs --status as
-#           whoever registered it, on every login (--status-stale-days
-#           is valid only with --status/--register-banner, and is carried
-#           into the generated banner). See
-#           docs/requirements/implemented/login-status-banner.md.
+#   1.1.9 (in progress - currently 1.1.9-dev1) - adds settings files
+#           and image pruning. Settings files (INI-style key = value,
+#           # or ; full-line comments) are read from the user
+#           ($XDG_CONFIG_HOME/scripts-config/bash_container-upgrader.conf),
+#           script-location (container-upgrader.conf next to the script)
+#           and system (/etc/scripts-config/bash_container-upgrader.conf)
+#           locations; command line > user > script-location > system,
+#           per setting. New --no-skip-* negation flags and --engine auto/
+#           --upgrade-level auto let the command line undo any file value;
+#           numeric options are now validated. New --prune none|dangling|
+#           all and --prune-until <N>m|h|d prune images once per run, before
+#           the pulls (a failure is a warning only); the run summary log
+#           gains a "prune" field. See docs/requirements/implemented/
+#           settings-file.md and image-prune.md.
+#   1.1.8 - adds a self-managed run summary log and a login status banner
+#           (--status, --register-banner/--unregister-banner); see
+#           CHANGELOG.md for detail.
 #   1.1.7 - adds manual systemd-unit-managed restart support (opt in via a
 #           `systemd.unit` label, with per-container scope resolution) plus
 #           three related bug fixes; see CHANGELOG.md for detail.
-#   1.1.6 - implements the repo-wide maintenance conventions from
-#           script-maintenance-convention.md (layered --help, CHANGELOG.md,
-#           the numbered-suffix versioning scheme) plus several real bugs
-#           found and fixed along the way; see CHANGELOG.md for detail.
 # HELP:IDENTITY:END
 #
 # HELP:INTRO:BEGIN
@@ -184,8 +180,24 @@
 #   --skip-crashing     Do not attempt to upgrade containers detected as
 #                        already crashing before the upgrade. Default is
 #                        to attempt them anyway (see policy above).
-#   --engine docker|podman  Container engine to use. If omitted, auto-detects:
+#   --no-skip-quadlet-restart, --no-skip-manual-unit-restart,
+#   --no-skip-systemd-restart, --no-skip-crashing, --no-skip-config-check
+#                        Turn the matching --skip-* option off again, e.g.
+#                        when a settings file turned it on.
+#   --engine docker|podman|auto  Container engine to use. Default: auto -
 #                        docker if present, else podman, else errors out.
+#   --prune none|dangling|all  Remove unneeded images (host-wide) once per
+#                        run, after the self-upgrade step and before the
+#                        image pulls, so images this run pulls - and any
+#                        image a container still uses - are never removed;
+#                        what an upgrade leaves behind goes on the next
+#                        run. dangling: untagged images not used by any
+#                        container; all: every image not used by any
+#                        container. A failed prune is a warning only.
+#                        Default: none.
+#   --prune-until <N>m|<N>h|<N>d|none  Only prune images CREATED (built)
+#                        more than this long ago - the image's build time,
+#                        not when it was pulled here. Default: none.
 #   --skip-config-check In safe mode, skip comparing the recreated
 #                        container's runtime config against the original.
 #                        Use if a specific container reliably shows a
@@ -212,6 +224,26 @@
 #                        Requires root.
 # HELP:CORE-OPTIONS:END
 #
+# HELP:SETTINGS:BEGIN
+# Settings files: persistent per-machine/per-user option values, read from
+# (highest precedence first, after the command line, per setting):
+#   user             $XDG_CONFIG_HOME/scripts-config/bash_container-upgrader.conf
+#                    (default ~/.config/scripts-config/...)
+#   script location  container-upgrader.conf next to this script
+#   system           /etc/scripts-config/bash_container-upgrader.conf
+# Format: one "key = value" per line, key = long option name without "--"
+# (e.g. "prune = dangling", "upgrade-level = beta", "skip-crashing = true");
+# full-line comments start with # or ; (spaces/tabs before them allowed).
+# Allowed keys: mode, timeout, precheck-seconds, recent-restart-threshold,
+# external-restart-wait, engine, skip-quadlet-restart,
+# skip-manual-unit-restart, skip-systemd-restart, skip-crashing,
+# skip-config-check, prune, prune-until, status-stale-days, upgrade-type
+# (use "upgrade-type = none" for --no-autoupdate), upgrade-level. Anything
+# else, an invalid value or a duplicate key is a fatal error naming the
+# file and line (--status ignores a broken file silently instead). Loaded
+# files are listed on a "Using settings from:" line after the startup line.
+# HELP:SETTINGS:END
+#
 # HELP:UPGRADE-OPTIONS:BEGIN
 # Self-upgrade options (this script updating its own file - see
 # "Self-upgrade" below; unrelated to upgrading container images, which is
@@ -224,10 +256,13 @@
 #                        unset (tries replacement first, cascading down).
 #                        Not combinable with --upgrade-check or
 #                        --no-autoupdate.
-#   --upgrade-level dev|alpha|beta|rc|stable
+#   --upgrade-level dev|alpha|beta|rc|stable|auto
 #                        Minimum release channel eligible for self-upgrade.
-#                        Default: unset (this script's own level - i.e.
+#                        Default: auto (this script's own level - i.e.
 #                        same-or-higher than what's currently running).
+#   (upgrade-type and upgrade-level can also come from a settings file -
+#   see --help; values from a file never bypass the 20-minute check
+#   cooldown, only these flags on the command line do.)
 #   --upgrade-check      Report what a self-upgrade would do (and which
 #                        apply mode this filesystem supports) and exit -
 #                        no download, no change made. Not combinable with
@@ -271,8 +306,8 @@
 # THE OUTPUT" in caps, also colored.
 #
 # Run summary log: every real run (not --dry-run/--upgrade-check/
-# --upgrade-only) appends one JSON-lines entry - date, version, mode, and
-# image/container up-to-date/success/failure counts - to
+# --upgrade-only) appends one JSON-lines entry - date, version, mode, prune
+# mode, and image/container up-to-date/success/failure counts - to
 # $XDG_STATE_HOME/scripts-state/bash_container-upgrader.log (default
 # ~/.local/state/scripts-state/bash_container-upgrader.log), trimmed to the
 # most recent 50 entries. Independent of cron/syslog/journald, so it's the
@@ -302,6 +337,7 @@ DRY_RUN=false
 NO_AUTOUPDATE=false
 UPGRADE_TYPE=""
 UPGRADE_LEVEL=""
+UPGRADE_CLI_EXPLICIT=false
 UPGRADE_CHECK=false
 UPGRADE_ONLY=false
 STATUS=false
@@ -309,6 +345,8 @@ STATUS_STALE_DAYS=3
 STATUS_STALE_DAYS_EXPLICIT=false
 REGISTER_BANNER=false
 UNREGISTER_BANNER=false
+PRUNE="none"
+PRUNE_UNTIL=""
 TARGETS=()
 
 # Version lives only in the header comment above (line 2: "# Version: X.Y.Z"
@@ -344,6 +382,27 @@ UPGRADE_BANNER_NOTE=""
 # below) since this is a meaningful record, not disposable cache.
 STATE_LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/${SCRIPT_LANG}_${SCRIPT_NAME}.log"
 STATE_LOG_MAX_ENTRIES=50
+
+# Settings files (docs/requirements/generic/script-settings-file-convention.md,
+# docs/requirements/implemented/settings-file.md), lowest precedence first
+# as loaded by settings_load_all. The script-location file is looked up next
+# to the *original* script: a self-upgrade trial run executes from a
+# temp/cache path, so its parent hands the real directory over in
+# CONTAINER_UPGRADE_ORIGINAL_DIR (honored only together with the re-entry
+# guard variable it is always exported with).
+if [[ -n "${CONTAINER_UPGRADE_APPLIED_FROM:-}" && -n "${CONTAINER_UPGRADE_ORIGINAL_DIR:-}" ]]; then
+  SETTINGS_SCRIPT_DIR="$CONTAINER_UPGRADE_ORIGINAL_DIR"
+else
+  SETTINGS_SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SETTINGS_SCRIPT_DIR=$(dirname "$0")
+fi
+SETTINGS_SYSTEM_FILE="/etc/scripts-config/${SCRIPT_LANG}_${SCRIPT_NAME}.conf"
+SETTINGS_SCRIPT_FILE="${SETTINGS_SCRIPT_DIR}/${SCRIPT_NAME}.conf"
+SETTINGS_USER_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/scripts-config/${SCRIPT_LANG}_${SCRIPT_NAME}.conf"
+# Keys given on the command line (space-delimited, padded), which settings
+# files must not override; files actually loaded, highest precedence first.
+CLI_SET_KEYS=" "
+SETTINGS_LOADED_FILES=()
+SETTINGS_SILENT=false
 
 # Login banner (docs/requirements/implemented/login-status-banner.md): a
 # generated /etc/update-motd.d/ script that runs `--status` as whichever
@@ -1200,7 +1259,7 @@ upgrade_main() {
   # to - report the outcome and skip checking again (the parent already did).
   if [[ -n "${CONTAINER_UPGRADE_APPLIED_FROM:-}" ]]; then
     UPGRADE_BANNER_NOTE=$(upgrade_banner_note applying "$CONTAINER_UPGRADE_APPLIED_FROM" "$CONTAINER_UPGRADE_APPLIED_MODE")
-    unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+    unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
     return 0
   fi
 
@@ -1208,8 +1267,7 @@ upgrade_main() {
   [[ "$NO_AUTOUPDATE" == "true" ]] && return 0
 
   local explicit=0
-  [[ -n "$UPGRADE_TYPE" ]] && explicit=1
-  [[ -n "$UPGRADE_LEVEL" ]] && explicit=1
+  $UPGRADE_CLI_EXPLICIT && explicit=1
   local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/${SCRIPT_LANG}_${SCRIPT_NAME}.state"
   local cache_source=""
   if [[ "$explicit" == "0" ]] && ! upgrade_cooldown_elapsed "$cache_file"; then
@@ -1241,6 +1299,7 @@ upgrade_main() {
   local latest="$UPGRADE_LATEST" mode="$UPGRADE_SELECTED_MODE" content="$UPGRADE_CANDIDATE_CONTENT" tag_hash="$UPGRADE_TAG_HASH"
   export CONTAINER_UPGRADE_APPLIED_FROM="$SCRIPT_VERSION"
   export CONTAINER_UPGRADE_APPLIED_MODE="$mode"
+  export CONTAINER_UPGRADE_ORIGINAL_DIR="$SETTINGS_SCRIPT_DIR"
 
   case "$mode" in
     replacement)
@@ -1255,7 +1314,7 @@ upgrade_main() {
         tmp=$(upgrade_write_temp_sibling "$content" "$SCRIPT_PATH")
       fi
       if [[ -z "$tmp" ]]; then
-        unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+        unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
         UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
         return 0
       fi
@@ -1302,7 +1361,7 @@ upgrade_main() {
         # reused below for persist-time hash re-verification (section 6)
         # instead of being written twice.
         if ! scratch=$(upgrade_write_temp_scratch "$content"); then
-          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
           UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
           return 0
         fi
@@ -1345,7 +1404,7 @@ upgrade_main() {
       cache_file2=$(upgrade_cache_file "$SCRIPT_LANG" "$SCRIPT_NAME")
       if [[ -n "$content" ]]; then
         if ! upgrade_persist_link "$content" "$cache_file2"; then
-          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
           UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write cache")
           return 0
         fi
@@ -1357,7 +1416,7 @@ upgrade_main() {
         # above: fall back to the original process's own work, not `exit`.
         if ! upgrade_verify_disk_hash "$cache_file2" "$tag_hash"; then
           rm -f "$cache_file2"
-          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+          unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
           UPGRADE_BANNER_NOTE=$(upgrade_banner_note hash_mismatch "$latest" "$SCRIPT_VERSION")
           return 0
         fi
@@ -1375,7 +1434,7 @@ upgrade_main() {
       # $0, and is discarded immediately once that run exits.
       local scratch code
       if ! scratch=$(upgrade_write_temp_scratch "$content"); then
-        unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+        unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
         UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file")
         return 0
       fi
@@ -1432,6 +1491,8 @@ usage() {
       printf '#\n'
       usage_region CORE-OPTIONS
       printf '#\n'
+      usage_region SETTINGS
+      printf '#\n'
       usage_region UPGRADE-OPTIONS
       printf '#\n'
       usage_region TAIL
@@ -1459,6 +1520,8 @@ usage() {
       usage_region USAGE
       printf '#\n'
       usage_region CORE-OPTIONS
+      printf '#\n'
+      usage_region SETTINGS
       printf '#\n# Self-upgrade options (this script updating its own file) are not shown\n# here - see --help upgrade, or --help full for everything together.\n#\n'
       usage_region TAIL
       printf '#\n'
@@ -1602,6 +1665,192 @@ unregister_banner_main() {
 # Login banner ends
 # =============================================================================
 
+# =============================================================================
+# Settings file (docs/requirements/generic/script-settings-file-convention.md)
+# - begins
+# =============================================================================
+
+# Validates one setting's value - the single validation used by both the
+# command line and settings files. args: $1=key (long option name without
+# "--"), $2=value. Returns 0 if valid; 1 if invalid, printing the accepted
+# values; 2 if $1 isn't a setting at all.
+setting_check() {
+  local key="$1" value="$2" expected
+  case "$key" in
+    mode) expected="simple|safe" ;;
+    engine) expected="docker|podman|auto" ;;
+    prune) expected="none|dangling|all" ;;
+    upgrade-type) expected="replacement|overwrite|link|memory|none" ;;
+    upgrade-level) expected="dev|alpha|beta|rc|stable|auto" ;;
+    skip-quadlet-restart|skip-manual-unit-restart|skip-systemd-restart|skip-crashing|skip-config-check)
+      expected="true|false" ;;
+    timeout|precheck-seconds|recent-restart-threshold|external-restart-wait|status-stale-days)
+      [[ "$value" =~ ^[0-9]+$ ]] && return 0
+      echo "a non-negative integer"
+      return 1 ;;
+    prune-until)
+      [[ "$value" == "none" || "$value" =~ ^[1-9][0-9]*[mhd]$ ]] && return 0
+      echo "<N>m|<N>h|<N>d|none"
+      return 1 ;;
+    *) return 2 ;;
+  esac
+  if [[ -n "$value" ]]; then
+    case "|$expected|" in *"|$value|"*) return 0 ;; esac
+  fi
+  echo "$expected"
+  return 1
+}
+
+# Applies an already-validated setting to the variable(s) behind it.
+# "auto"/"none" map back to the built-in default (unset/auto-detect).
+setting_assign() {
+  local key="$1" value="$2"
+  case "$key" in
+    mode) MODE="$value" ;;
+    timeout) TIMEOUT="$value" ;;
+    precheck-seconds) PRECHECK_SECONDS="$value" ;;
+    recent-restart-threshold) RECENT_RESTART_THRESHOLD="$value" ;;
+    external-restart-wait) EXTERNAL_RESTART_WAIT="$value" ;;
+    status-stale-days) STATUS_STALE_DAYS="$value" ;;
+    engine)
+      if [[ "$value" == "auto" ]]; then
+        ENGINE=""; ENGINE_EXPLICIT=false
+      else
+        ENGINE="$value"; ENGINE_EXPLICIT=true
+      fi ;;
+    skip-quadlet-restart) SKIP_QUADLET_RESTART="$value" ;;
+    skip-manual-unit-restart) SKIP_MANUAL_UNIT_RESTART="$value" ;;
+    skip-systemd-restart) SKIP_SYSTEMD_RESTART="$value" ;;
+    skip-crashing) SKIP_CRASHING="$value" ;;
+    skip-config-check) SKIP_CONFIG_CHECK="$value" ;;
+    prune) PRUNE="$value" ;;
+    prune-until) if [[ "$value" == "none" ]]; then PRUNE_UNTIL=""; else PRUNE_UNTIL="$value"; fi ;;
+    upgrade-type) UPGRADE_TYPE="$value" ;;
+    upgrade-level) if [[ "$value" == "auto" ]]; then UPGRADE_LEVEL=""; else UPGRADE_LEVEL="$value"; fi ;;
+  esac
+}
+
+# Command-line counterpart of a settings-file entry: validates (fatal on an
+# invalid value, same message format as before settings files existed),
+# applies, and records the key so no settings file overrides it.
+cli_setting() {
+  local key="$1" value="$2" expected
+  if ! expected=$(setting_check "$key" "$value"); then
+    err "Invalid --$key: $value (expected $expected)"
+    exit 1
+  fi
+  setting_assign "$key" "$value"
+  CLI_SET_KEYS="${CLI_SET_KEYS}${key} "
+}
+
+# Parses and validates one settings file into SETTINGS_FILE_KEYS/
+# SETTINGS_FILE_VALUES without applying anything, so a file with any error
+# can be rejected as a whole. Parsed, never sourced - the system-wide file
+# may be read by a root run. On the first problem, sets SETTINGS_ERROR to
+# "<file>:<line>: <problem>" and returns 1.
+settings_parse_file() {
+  local file="$1" line key value quote expected rc lineno=0 i
+  SETTINGS_FILE_KEYS=()
+  SETTINGS_FILE_VALUES=()
+  SETTINGS_ERROR=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    # Trim leading/trailing whitespace ([:space:] also drops a CRLF's \r).
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      '#'*|';'*) continue ;;
+      '['*) SETTINGS_ERROR="$file:$lineno: section headers are not supported"; return 1 ;;
+    esac
+    if [[ "$line" != *=* ]]; then
+      SETTINGS_ERROR="$file:$lineno: malformed line (expected key = value)"
+      return 1
+    fi
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    if [[ -z "$key" ]]; then
+      SETTINGS_ERROR="$file:$lineno: malformed line (expected key = value)"
+      return 1
+    fi
+    if [[ ${#value} -ge 2 ]]; then
+      quote="${value:0:1}"
+      if [[ ( "$quote" == '"' || "$quote" == "'" ) && "${value: -1}" == "$quote" ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    case "$key" in
+      restart-all|dry-run|upgrade-check|upgrade-only|status|register-banner|unregister-banner|help|no-skip-*)
+        SETTINGS_ERROR="$file:$lineno: $key is only valid on the command line"
+        return 1 ;;
+      no-autoupdate)
+        SETTINGS_ERROR="$file:$lineno: no-autoupdate is only valid on the command line (use upgrade-type = none)"
+        return 1 ;;
+    esac
+    expected=$(setting_check "$key" "$value"); rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+      SETTINGS_ERROR="$file:$lineno: unknown setting '$key'"
+      return 1
+    elif [[ "$rc" -ne 0 ]]; then
+      SETTINGS_ERROR="$file:$lineno: invalid value for $key: '$value' (expected $expected)"
+      return 1
+    fi
+    for ((i = 0; i < ${#SETTINGS_FILE_KEYS[@]}; i++)); do
+      if [[ "${SETTINGS_FILE_KEYS[$i]}" == "$key" ]]; then
+        SETTINGS_ERROR="$file:$lineno: duplicate setting '$key'"
+        return 1
+      fi
+    done
+    SETTINGS_FILE_KEYS+=("$key")
+    SETTINGS_FILE_VALUES+=("$value")
+  done < "$file"
+  return 0
+}
+
+# Loads system, script-location, then user settings - each later file
+# overriding earlier ones key by key, none overriding a key given on the
+# command line (CLI_SET_KEYS). A content error is fatal; in silent mode
+# (--status) the offending file is ignored as a whole without output.
+settings_load_all() {
+  local file i key
+  SETTINGS_LOADED_FILES=()
+  for file in "$SETTINGS_SYSTEM_FILE" "$SETTINGS_SCRIPT_FILE" "$SETTINGS_USER_FILE"; do
+    [[ -e "$file" ]] || continue
+    if [[ -d "$file" || ! -r "$file" ]]; then
+      $SETTINGS_SILENT || log "WARNING: settings file $file is not readable - ignored."
+      continue
+    fi
+    if ! settings_parse_file "$file"; then
+      $SETTINGS_SILENT && continue
+      err "Settings error: $SETTINGS_ERROR"
+      exit 1
+    fi
+    for ((i = 0; i < ${#SETTINGS_FILE_KEYS[@]}; i++)); do
+      key="${SETTINGS_FILE_KEYS[$i]}"
+      case "$CLI_SET_KEYS" in *" $key "*) continue ;; esac
+      setting_assign "$key" "${SETTINGS_FILE_VALUES[$i]}"
+    done
+    SETTINGS_LOADED_FILES=("$file" "${SETTINGS_LOADED_FILES[@]+"${SETTINGS_LOADED_FILES[@]}"}")
+  done
+}
+
+# Prints "Using settings from: <files>" (highest precedence first), or
+# nothing if no settings file was loaded.
+settings_banner_line() {
+  [[ ${#SETTINGS_LOADED_FILES[@]} -eq 0 ]] && return 0
+  local joined="" f
+  for f in "${SETTINGS_LOADED_FILES[@]}"; do
+    joined="${joined:+$joined, }$f"
+  done
+  printf 'Using settings from: %s\n' "$joined"
+}
+
+# =============================================================================
+# Settings file ends
+# =============================================================================
+
 # Captured before the parsing loop below consumes "$@", so upgrade_main can
 # forward the original arguments unchanged to a trial-run child process.
 ORIGINAL_ARGS=("$@")
@@ -1609,65 +1858,43 @@ ORIGINAL_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --restart-all) RESTART_ALL=true; shift ;;
-    --skip-config-check) SKIP_CONFIG_CHECK=true; shift ;;
-    --skip-crashing) SKIP_CRASHING=true; shift ;;
+    --skip-config-check) cli_setting skip-config-check true; shift ;;
+    --no-skip-config-check) cli_setting skip-config-check false; shift ;;
+    --skip-crashing) cli_setting skip-crashing true; shift ;;
+    --no-skip-crashing) cli_setting skip-crashing false; shift ;;
+    --prune) cli_setting prune "${2:-}"; shift 2 ;;
+    --prune-until) cli_setting prune-until "${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     # --- self-upgrade: flags (script-upgrade-convention.md section 13) ----
-    --no-autoupdate) NO_AUTOUPDATE=true; shift ;;
-    --upgrade-type)
-      UPGRADE_TYPE="${2:-}"
-      case "$UPGRADE_TYPE" in
-        replacement|overwrite|link|memory|none) ;;
-        *) err "Invalid --upgrade-type: $UPGRADE_TYPE (expected replacement|overwrite|link|memory|none)"; exit 1 ;;
-      esac
-      shift 2 ;;
-    --upgrade-level)
-      UPGRADE_LEVEL="${2:-}"
-      case "$UPGRADE_LEVEL" in
-        dev|alpha|beta|rc|stable) ;;
-        *) err "Invalid --upgrade-level: $UPGRADE_LEVEL (expected dev|alpha|beta|rc|stable)"; exit 1 ;;
-      esac
-      shift 2 ;;
+    # --no-autoupdate is an alias of --upgrade-type none: the same setting,
+    # so it also shields upgrade-type from settings files.
+    --no-autoupdate) NO_AUTOUPDATE=true; CLI_SET_KEYS="${CLI_SET_KEYS}upgrade-type "; shift ;;
+    --upgrade-type) cli_setting upgrade-type "${2:-}"; UPGRADE_CLI_EXPLICIT=true; shift 2 ;;
+    --upgrade-level) cli_setting upgrade-level "${2:-}"; UPGRADE_CLI_EXPLICIT=true; shift 2 ;;
     --upgrade-check) UPGRADE_CHECK=true; shift ;;
     --upgrade-only) UPGRADE_ONLY=true; shift ;;
     # ------------------------------------------------------------------------
     # --- login banner: flags (see MOTD_DIR/MOTD_SCRIPT_NAME above) ---------
     --status) STATUS=true; shift ;;
     --status-stale-days)
-      STATUS_STALE_DAYS="${2:-}"
+      cli_setting status-stale-days "${2:-}"
       STATUS_STALE_DAYS_EXPLICIT=true
       shift 2 ;;
     --register-banner) REGISTER_BANNER=true; shift ;;
     --unregister-banner) UNREGISTER_BANNER=true; shift ;;
     # ------------------------------------------------------------------------
-    --mode)
-      MODE="${2:-}"
-      if [[ "$MODE" != "simple" && "$MODE" != "safe" ]]; then
-        err "Invalid --mode: $MODE (expected simple|safe)"; exit 1
-      fi
-      shift 2 ;;
-    --timeout)
-      TIMEOUT="${2:-}"
-      shift 2 ;;
-    --precheck-seconds)
-      PRECHECK_SECONDS="${2:-}"
-      shift 2 ;;
-    --recent-restart-threshold)
-      RECENT_RESTART_THRESHOLD="${2:-}"
-      shift 2 ;;
-    --external-restart-wait)
-      EXTERNAL_RESTART_WAIT="${2:-}"
-      shift 2 ;;
-    --skip-quadlet-restart) SKIP_QUADLET_RESTART=true; shift ;;
-    --skip-manual-unit-restart) SKIP_MANUAL_UNIT_RESTART=true; shift ;;
-    --skip-systemd-restart) SKIP_SYSTEMD_RESTART=true; shift ;;
-    --engine)
-      ENGINE="${2:-}"
-      ENGINE_EXPLICIT=true
-      if [[ "$ENGINE" != "docker" && "$ENGINE" != "podman" ]]; then
-        err "Invalid --engine: $ENGINE (expected docker|podman)"; exit 1
-      fi
-      shift 2 ;;
+    --mode) cli_setting mode "${2:-}"; shift 2 ;;
+    --timeout) cli_setting timeout "${2:-}"; shift 2 ;;
+    --precheck-seconds) cli_setting precheck-seconds "${2:-}"; shift 2 ;;
+    --recent-restart-threshold) cli_setting recent-restart-threshold "${2:-}"; shift 2 ;;
+    --external-restart-wait) cli_setting external-restart-wait "${2:-}"; shift 2 ;;
+    --skip-quadlet-restart) cli_setting skip-quadlet-restart true; shift ;;
+    --no-skip-quadlet-restart) cli_setting skip-quadlet-restart false; shift ;;
+    --skip-manual-unit-restart) cli_setting skip-manual-unit-restart true; shift ;;
+    --no-skip-manual-unit-restart) cli_setting skip-manual-unit-restart false; shift ;;
+    --skip-systemd-restart) cli_setting skip-systemd-restart true; shift ;;
+    --no-skip-systemd-restart) cli_setting skip-systemd-restart false; shift ;;
+    --engine) cli_setting engine "${2:-}"; shift 2 ;;
     -h|--help)
       case "${2:-}" in
         full) usage full ;;
@@ -1715,6 +1942,18 @@ if [[ "$STATUS_STALE_DAYS_EXPLICIT" == "true" ]] && ! $STATUS && ! $REGISTER_BAN
   exit 1
 fi
 unset _banner_flags_set
+
+# --- settings files: loaded after the command-line combination checks above
+# (those apply to the command line only) and before any dispatch, so every
+# mode below - including self-upgrade - sees the effective values. --status
+# runs on every login and must stay silent, whatever the files contain.
+SETTINGS_SILENT=$STATUS
+settings_load_all
+# An explicit --upgrade-only wins over a file's "upgrade-type = none"; any
+# other file value still caps its apply mode.
+if $UPGRADE_ONLY && [[ "$UPGRADE_TYPE" == "none" ]]; then
+  case "$CLI_SET_KEYS" in *" upgrade-type "*) ;; *) UPGRADE_TYPE="" ;; esac
+fi
 
 # --- self-upgrade: --upgrade-check / --upgrade-only exit before any --------
 # container-engine work; see sections 11-12. Neither ever reaches the
@@ -2607,6 +2846,61 @@ restart_safe() {
 }
 
 # ---------------------------------------------------------------------------
+# Image prune (docs/requirements/implemented/image-prune.md)
+# ---------------------------------------------------------------------------
+
+# Docker and Podman both take Go durations for the `until` filter, which
+# have no day unit: "7d" -> "168h"; "<N>h"/"<N>m" pass through unchanged.
+prune_until_filter() {
+  local value="$1"
+  case "$value" in
+    *d) printf '%sh\n' "$(( ${value%d} * 24 ))" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+# Removes unneeded images host-wide per PRUNE/PRUNE_UNTIL. Runs once, before
+# the image pulls, so nothing pulled by this run can be pruned by it, and
+# images still used by a container (including a safe-mode rollback's) are
+# never touched. A failure is a warning only - housekeeping, not the
+# upgrade itself - so HAD_ERRORS/the exit code are unaffected.
+prune_images() {
+  [[ "$PRUNE" == "none" ]] && return 0
+  local args=(image prune) desc="$PRUNE images (host-wide" filter output code line
+  [[ "$PRUNE" == "all" ]] && args+=(-a)
+  args+=(-f)
+  if [[ -n "$PRUNE_UNTIL" ]]; then
+    filter=$(prune_until_filter "$PRUNE_UNTIL")
+    args+=(--filter "until=$filter")
+    desc="$desc, older than $filter"
+  fi
+  desc="$desc)"
+
+  if $DRY_RUN; then
+    log "Dry run: would prune $desc"
+    if [[ "$PRUNE" == "dangling" && -z "$PRUNE_UNTIL" ]]; then
+      log "  Dangling images that would be removed:"
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        log "    $line"
+      done < <($ENGINE image ls -f dangling=true 2>&1)
+    else
+      log "  (no preview of the exact images is available for this selection)"
+    fi
+    return 0
+  fi
+
+  log "== Pruning $desc =="
+  output=$($ENGINE "${args[@]}" 2>&1); code=$?
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] && log "  $line"
+  done <<< "$output"
+  if [[ "$code" -ne 0 ]]; then
+    log "WARNING: image prune failed (exit $code) - continuing with the upgrade."
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2629,7 +2923,9 @@ if [[ ${#CONTAINERS[@]} -eq 0 ]]; then
 fi
 
 log "container-upgrader.sh v${SCRIPT_VERSION}${UPGRADE_BANNER_NOTE}"
-log "Engine: $ENGINE | Mode: $MODE | Timeout: ${TIMEOUT}s | Precheck: ${PRECHECK_SECONDS}s | Recent-restart-threshold: ${RECENT_RESTART_THRESHOLD}s | Restart-all: $RESTART_ALL | Skip-crashing: $SKIP_CRASHING"
+settings_line=$(settings_banner_line)
+[[ -n "$settings_line" ]] && log "$settings_line"
+log "Engine: $ENGINE | Mode: $MODE | Timeout: ${TIMEOUT}s | Precheck: ${PRECHECK_SECONDS}s | Recent-restart-threshold: ${RECENT_RESTART_THRESHOLD}s | Restart-all: $RESTART_ALL | Skip-crashing: $SKIP_CRASHING | Prune: $PRUNE${PRUNE_UNTIL:+ (until $PRUNE_UNTIL)}"
 
 # IMAGE_OF, OLD_ID_OF, NEW_ID_OF_IMAGE, PULL_FAILED_IMAGE, IMAGE_CHANGED,
 # PRE_STATUS, CONTAINER_CHANGED and RESULT are all maps emulated with the
@@ -2669,6 +2965,9 @@ if [[ ${#CONTAINERS[@]} -eq 0 ]]; then
   fi
   exit 1
 fi
+
+# --- Prune (before any pull - see prune_images) ----------------------------
+prune_images
 
 # --- Phase 2: pull each unique image once ---------------------------------
 # Portable equivalent of `mapfile -t UNIQUE_IMAGES < <(...)` (see the
@@ -3005,12 +3304,13 @@ write_run_state_log() {
     --arg date "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     --arg version "$SCRIPT_VERSION" \
     --arg mode "$MODE" \
+    --arg prune "$PRUNE" \
     --argjson containers_not_uptodate "$not_uptodate" \
     --argjson images_updated_successfully "$images_ok" \
     --argjson images_update_failed "$images_failed" \
     --argjson containers_updated_successfully "$containers_ok" \
     --argjson containers_update_failed "$containers_failed" \
-    '{date: $date, version: $version, mode: $mode,
+    '{date: $date, version: $version, mode: $mode, prune: $prune,
       containers_not_uptodate: $containers_not_uptodate,
       images_updated_successfully: $images_updated_successfully,
       images_update_failed: $images_update_failed,

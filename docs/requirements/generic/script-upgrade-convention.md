@@ -105,6 +105,11 @@ An **implicit** invocation — none of `--upgrade-type`, `--upgrade-level`,
   than the cooldown window (proposed default: 20 minutes — a tunable
   value, not a hard requirement of this convention).
 
+For a script that also adopts [[script-settings-file-convention]], "present"
+means present on the command line: `upgrade-type`/`upgrade-level` values
+coming from a settings file never make an invocation explicit (that
+convention's section 8).
+
 An **explicit** invocation — any of those flags present — always checks
 fresh, bypassing the cooldown cache, *except* when the net effect is
 "upgrading is disabled" (`--upgrade-type none` or `--no-autoupdate`), which
@@ -579,6 +584,12 @@ flag and its default appear there:
 - `--upgrade-only` — see section 12.
 - `--no-autoupdate` — shortcut/alias for `--upgrade-type none`. Not
   combinable with `--upgrade-type`.
+
+A script that adopts [[script-settings-file-convention]] can also take
+`upgrade-type`/`upgrade-level` from a settings file (`--no-autoupdate` has
+no file key of its own — use `upgrade-type = none`), and passes the
+original script's directory to a trial-run candidate so it finds the same
+script-location settings file. See that convention's section 8.
 
 ### 14. Cooldown cache
 Best-effort, per script, stored outside the script's own (possibly

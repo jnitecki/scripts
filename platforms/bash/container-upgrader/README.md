@@ -199,7 +199,7 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/scripts-state/bash_container-upgrader.log
 Each line is a single JSON object:
 
 ```json
-{"date":"2026-09-21T09:31:02Z","version":"1.1.8","mode":"safe","containers_not_uptodate":0,"images_updated_successfully":2,"images_update_failed":0,"containers_updated_successfully":3,"containers_update_failed":0}
+{"date":"2026-09-21T09:31:02Z","version":"1.1.9","mode":"safe","prune":"dangling","containers_not_uptodate":0,"images_updated_successfully":2,"images_update_failed":0,"containers_updated_successfully":3,"containers_update_failed":0}
 ```
 
 | Field | Meaning |
@@ -207,6 +207,7 @@ Each line is a single JSON object:
 | `date` | Run timestamp, ISO-8601 UTC. |
 | `version` | The script version that ran. |
 | `mode` | `simple` or `safe`. |
+| `prune` | `none`, `dangling` or `all` — see [Image prune](#image-prune). |
 | `containers_not_uptodate` | Containers not confirmed running the latest image afterward — image pull failed, or a restart wasn't even attempted (skipped as already-crashing, or a systemd-unit restart that couldn't safely proceed, including the "requires root" case). |
 | `images_updated_successfully` | Unique images successfully pulled with an actual version change. |
 | `images_update_failed` | Unique images whose pull failed. |
@@ -216,6 +217,99 @@ Each line is a single JSON object:
 The file is trimmed to its most recent 50 entries after every run — check
 the latest one with `tail -n1 <file> | jq .`. Writing this log is
 best-effort and never affects the run's own exit code.
+
+## Image prune
+
+Upgrades leave the replaced images on disk. `--prune` removes unneeded
+images as part of a normal run:
+
+- **`none`** (default) — no pruning.
+- **`dangling`** — untagged images not used by any container
+  (`<engine> image prune -f`).
+- **`all`** — every image not used by any container, running or stopped
+  (`<engine> image prune -a -f`).
+
+Pruning runs once per run, host-wide (even when container names are given),
+after the self-upgrade step and **before** the image pulls. Nothing pulled
+by this run can be pruned by it, and an image still used by a container —
+including the one a rollback would return to — is never removed. The images
+an upgrade leaves behind are pruned on the next run. Only images are pruned;
+containers, networks, volumes and build cache are never touched.
+
+`--prune-until <N>m|<N>h|<N>d` limits pruning to older images. Note that
+the age is the image's **creation (build) time**, not when it was pulled to
+this host: an image built three weeks ago and pulled yesterday counts as
+three weeks old. So `--prune-until 7d` doesn't mean "keep what I pulled
+this week"; it mainly protects images you built locally or that were
+published very recently.
+
+A failed prune is reported as a warning and doesn't change the exit code;
+the run continues with the pulls. With `--dry-run`, nothing is pruned: the
+script reports what would be pruned, and lists the dangling images when
+`--prune dangling` is used without `--prune-until`.
+
+## Settings files
+
+Options you'd otherwise repeat on every run (e.g. from cron) can be set in a
+settings file instead. Three locations are read:
+
+| Source | Path |
+| --- | --- |
+| User | `${XDG_CONFIG_HOME:-$HOME/.config}/scripts-config/bash_container-upgrader.conf` |
+| Script location | `container-upgrader.conf` in the same directory as the script |
+| System | `/etc/scripts-config/bash_container-upgrader.conf` |
+
+Precedence, highest first: **command line > user > script location >
+system > built-in default**. Each setting is resolved on its own: a user
+file that only sets `prune` doesn't stop `mode` from coming from the system
+file.
+
+Format — one `key = value` per line, where the key is the long option name
+without `--`:
+
+```ini
+# /etc/scripts-config/bash_container-upgrader.conf
+prune = dangling
+prune-until = 7d
+upgrade-level = stable
+skip-crashing = true
+```
+
+- Full-line comments start with `#` or `;` (spaces/tabs before them are
+  fine). A `#` or `;` after a value is part of the value.
+- Values may be wrapped in `"..."` or `'...'`. Booleans are `true`/`false`.
+- No `[sections]`.
+- The file is only parsed, never executed.
+
+Allowed keys: `mode`, `timeout`, `precheck-seconds`,
+`recent-restart-threshold`, `external-restart-wait`, `engine`,
+`skip-quadlet-restart`, `skip-manual-unit-restart`, `skip-systemd-restart`,
+`skip-crashing`, `skip-config-check`, `prune`, `prune-until`,
+`status-stale-days`, `upgrade-type`, `upgrade-level`. Use
+`upgrade-type = none` to disable self-upgrade (there's no `no-autoupdate`
+key). One-shot options (`--restart-all`, `--dry-run`, `--status`,
+`--upgrade-check`, ...) are command-line only.
+
+An unknown key, a command-line-only key, an invalid value, a duplicate key
+or a malformed line stops the script with an error naming the file and
+line. The exception is `--status`: it runs at every login, so it silently
+ignores a broken file. A file that exists but can't be read is skipped
+with a warning.
+
+When any file was used, the startup output shows which ones:
+
+```
+Using settings from: /home/me/.config/scripts-config/bash_container-upgrader.conf, /etc/scripts-config/bash_container-upgrader.conf
+```
+
+To undo a file value for one run, pass the option on the command line:
+`--no-skip-crashing` (and the other `--no-skip-*` forms), `--engine auto`,
+`--upgrade-level auto`, `--prune none`, `--prune-until none`.
+
+`upgrade-type`/`upgrade-level` from a file affect self-upgrade like the
+flags do, with one difference: only the flags on the command line skip the
+20-minute check cooldown. A file's `upgrade-type = none` doesn't stop an
+explicit `--upgrade-only` or `--upgrade-check`.
 
 ## Login status banner
 
@@ -254,6 +348,9 @@ sudo ./container-upgrader.sh --unregister-banner
 
 ## Options
 
+Most options can also be set in a [settings file](#settings-files); the
+command line always wins. Numeric values must be non-negative integers.
+
 | Option | Description |
 | --- | --- |
 | `--restart-all` | Recreate every targeted container regardless of whether its image actually changed. |
@@ -266,15 +363,18 @@ sudo ./container-upgrader.sh --unregister-banner
 | `--skip-manual-unit-restart` | Do not use the systemd-managed restart path for a container whose only trigger is a manual `systemd.unit` label; a `PODMAN_SYSTEMD_UNIT` label still triggers it. See [Systemd-managed restart](#systemd-managed-restart). Default: off. |
 | `--skip-systemd-restart` | Do not use the systemd-managed restart path at all, for either trigger. See [Systemd-managed restart](#systemd-managed-restart). Default: off. |
 | `--skip-crashing` | Do not attempt to upgrade containers detected as already crashing before the upgrade. Default is to attempt them anyway (see policy above). |
-| `--engine docker\|podman` | Container engine to use. If omitted, auto-detects: docker if present, else podman, else errors out. |
+| `--no-skip-quadlet-restart`, `--no-skip-manual-unit-restart`, `--no-skip-systemd-restart`, `--no-skip-crashing`, `--no-skip-config-check` | Turn the matching `--skip-*` option off again, e.g. when a settings file turned it on. |
+| `--engine docker\|podman\|auto` | Container engine to use. Default: `auto` — docker if present, else podman, else errors out. |
+| `--prune none\|dangling\|all` | Remove unneeded images, host-wide, once per run before the image pulls. See [Image prune](#image-prune). Default: `none`. |
+| `--prune-until <N>m\|<N>h\|<N>d\|none` | Only prune images whose creation (build) time is older than this. Default: `none`. |
 | `--skip-config-check` | In safe mode, skip comparing the recreated container's runtime config against the original. Use if a specific container reliably shows a diff you've already verified is harmless. |
 | `--dry-run` | Show what would happen, take no action, and skip the health-outcome summary (nothing was run). |
 | `--status` | Print at most one line from the run summary log and exit. See [Login status banner](#login-status-banner). |
-| `--status-stale-days N` | Days since the last run before `--status` shows the "last upgraded N day(s) ago" line. Default: `3`. Only valid with `--status` or `--register-banner` (an error otherwise); with `--register-banner` it is carried into the installed login banner. |
+| `--status-stale-days N` | Days since the last run before `--status` shows the "last upgraded N day(s) ago" line (also settable in a [settings file](#settings-files), where it applies to `--status` directly). Default: `3`. Only valid with `--status` or `--register-banner` (an error otherwise); with `--register-banner` it is carried into the installed login banner. |
 | `--register-banner` | Install a `/etc/update-motd.d/` script that runs `--status` on every login. Requires root. Ubuntu/Debian only. See [Login status banner](#login-status-banner). |
 | `--unregister-banner` | Remove the script `--register-banner` installed. Requires root. |
 | `--upgrade-type replacement\|overwrite\|link\|memory\|none` | Caps which self-upgrade apply mode is attempted (falls back to a weaker mode automatically if the requested one isn't possible on this filesystem); `none` disables self-upgrade entirely. Default: unset (tries `replacement` first, cascading down). Not combinable with `--upgrade-check` or `--no-autoupdate`. |
-| `--upgrade-level dev\|alpha\|beta\|rc\|stable` | Minimum release channel eligible for self-upgrade. Default: unset (this script's own level — same-or-higher than what's currently running). |
+| `--upgrade-level dev\|alpha\|beta\|rc\|stable\|auto` | Minimum release channel eligible for self-upgrade. Default: `auto` (this script's own level — same-or-higher than what's currently running). |
 | `--upgrade-check` | Report what a self-upgrade would do (and which apply mode this filesystem supports) and exit — no download, no change made. Not combinable with `--upgrade-type` or `--upgrade-only`. |
 | `--upgrade-only` | Perform the self-upgrade check and, if eligible, the upgrade itself, then exit without doing any container work. Not combinable with `--upgrade-check`. |
 | `--no-autoupdate` | Shortcut for `--upgrade-type none`: skip self-upgrade entirely for this run. Not combinable with `--upgrade-type`. |

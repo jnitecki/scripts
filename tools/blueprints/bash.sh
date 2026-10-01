@@ -36,6 +36,18 @@
 # UPGRADE_TYPE=""            # replacement|overwrite|link|memory|none
 # UPGRADE_LEVEL=""           # dev|alpha|beta|rc|stable
 # NO_AUTOUPDATE=0            # 1 if --no-autoupdate was passed
+# UPGRADE_CLI_EXPLICIT=0     # 1 if --upgrade-type/--upgrade-level was given
+#                            # on the command line (section 2). Tracked
+#                            # separately from the values above because a
+#                            # script adopting script-settings-file-
+#                            # convention.md can also get them from a
+#                            # settings file, which must never bypass the
+#                            # cooldown (that convention's section 8).
+# --- Only for scripts adopting script-settings-file-convention.md ----------
+# SETTINGS_SCRIPT_DIR        # the original script's directory; handed to a
+#                            # trial-run candidate (CONTAINER_UPGRADE_ORIGINAL_DIR)
+#                            # so it finds the same script-location settings
+#                            # file even though it runs from a temp/cache path.
 
 # --- section 3: release levels ----------------------------------------------
 # dev < alpha < beta < rc < stable (same precedence as script-catalog-generator).
@@ -672,15 +684,14 @@ upgrade_banner_note() {
 #   # to - report the outcome and skip checking again (the parent already did).
 #   if [ -n "${CONTAINER_UPGRADE_APPLIED_FROM:-}" ]; then
 #     UPGRADE_BANNER_NOTE=$(upgrade_banner_note applying "$CONTAINER_UPGRADE_APPLIED_FROM" "$CONTAINER_UPGRADE_APPLIED_MODE")
-#     unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+#     unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
 #     return 0
 #   fi
 #   [ "$UPGRADE_TYPE" = "none" ] && return 0
 #   [ "$NO_AUTOUPDATE" = "1" ] && return 0
 #
 #   local explicit=0
-#   [ -n "$UPGRADE_TYPE" ] && explicit=1
-#   [ -n "$UPGRADE_LEVEL" ] && explicit=1
+#   [ "$UPGRADE_CLI_EXPLICIT" = "1" ] && explicit=1
 #   local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/scripts-upgrade/${SCRIPT_LANG}_${SCRIPT_NAME}.state"
 #   local cache_source=""
 #   if [ "$explicit" = "0" ] && ! upgrade_cooldown_elapsed "$cache_file"; then
@@ -710,6 +721,7 @@ upgrade_banner_note() {
 #
 #   export CONTAINER_UPGRADE_APPLIED_FROM="$SCRIPT_VERSION"
 #   export CONTAINER_UPGRADE_APPLIED_MODE="$mode"
+#   export CONTAINER_UPGRADE_ORIGINAL_DIR="$SETTINGS_SCRIPT_DIR"
 #   case "$mode" in
 #     replacement)
 #       # $content is empty when this candidate was promoted from the local
@@ -721,7 +733,7 @@ upgrade_banner_note() {
 #       else
 #         tmp=$(upgrade_write_temp_sibling "$content" "$SCRIPT_PATH")
 #       fi
-#       [ -n "$tmp" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
+#       [ -n "$tmp" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
 #       "$tmp" "$@"; local code=$?
 #       if [ "$code" -eq 0 ]; then
 #         # Persist-time re-verification (section 6): re-hash the actual
@@ -764,7 +776,7 @@ upgrade_banner_note() {
 #         # both at once, and doubles as the persist-time re-verification
 #         # copy below instead of being written twice.
 #         scratch=$(upgrade_write_temp_scratch "$content")
-#         [ -n "$scratch" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
+#         [ -n "$scratch" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
 #         bash "$scratch" "$@"; local code=$?
 #       fi
 #       if [ "$code" -eq 0 ]; then
@@ -804,7 +816,7 @@ upgrade_banner_note() {
 #       # confirmed the cached file's hash matches - nothing new to write or
 #       # re-verify).
 #       if [ -n "$content" ]; then
-#         upgrade_persist_link "$content" "$cache_file2" || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write cache"); return 0; }
+#         upgrade_persist_link "$content" "$cache_file2" || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write cache"); return 0; }
 #         # Persist-time re-verification (section 6): unlike replacement/
 #         # overwrite, "link" persists *before* its trial run (section 7),
 #         # so this runs here instead - before the cache file is ever
@@ -813,7 +825,7 @@ upgrade_banner_note() {
 #         # via `return 0`, never `exit`.
 #         if ! upgrade_verify_disk_hash "$cache_file2" "$tag_hash"; then
 #           rm -f "$cache_file2"
-#           unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE
+#           unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR
 #           UPGRADE_BANNER_NOTE=$(upgrade_banner_note hash_mismatch "$latest" "$SCRIPT_VERSION")
 #           return 0
 #         fi
@@ -829,7 +841,7 @@ upgrade_banner_note() {
 #       # file for afterward - it exists purely to give the trial run a
 #       # real $0, discarded immediately once that run exits.
 #       local scratch; scratch=$(upgrade_write_temp_scratch "$content")
-#       [ -n "$scratch" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
+#       [ -n "$scratch" ] || { unset CONTAINER_UPGRADE_APPLIED_FROM CONTAINER_UPGRADE_APPLIED_MODE CONTAINER_UPGRADE_ORIGINAL_DIR; UPGRADE_BANNER_NOTE=$(upgrade_banner_note check_failed "could not write temp file"); return 0; }
 #       bash "$scratch" "$@"; local code=$?
 #       rm -f "$scratch"
 #       exit "$code"   # never persisted, regardless of outcome

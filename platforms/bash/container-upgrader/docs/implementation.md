@@ -94,7 +94,11 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
   implicit invocation — any of `--upgrade-type`/`--upgrade-level`/
   `--upgrade-check`/`--upgrade-only` forces a fresh check (unless the net
   effect is disabled), which is why `--force-update-check` was removed as
-  redundant.
+  redundant. Since 1.1.9-dev1, `upgrade_main` decides this from
+  `UPGRADE_CLI_EXPLICIT` (set while parsing `--upgrade-type`/
+  `--upgrade-level`), not from `UPGRADE_TYPE`/`UPGRADE_LEVEL` being
+  non-empty, since those can now also come from a settings file - see
+  "Settings files" below.
 - **New flags**: `--upgrade-type`, `--upgrade-level`, `--upgrade-check`,
   `--upgrade-only`, `--no-autoupdate` (kept as an alias for
   `--upgrade-type none`), documented in the header's `--help` text
@@ -466,3 +470,71 @@ Blueprint followed: `tools/blueprints/bash.sh` (both renamed from their
     successful register (correct generated content, target user, `chmod
     755`), unregister removing it, unregister no-op when already absent,
     and unregister refusing to delete a file without `MOTD_MARKER`.
+- **Settings files (1.1.9-dev1)** - see
+  `docs/requirements/implemented/settings-file.md` and
+  `docs/requirements/generic/script-settings-file-convention.md`. All code
+  lives in one `# === Settings file ... begins/ends ===` block right before
+  the argument-parsing loop (it's called from that loop):
+  - `setting_check key value` is the single validator for both sources
+    (returns 0 valid, 1 invalid - printing the accepted values - or 2 for a
+    key that isn't a setting). `setting_assign` maps a key onto its
+    variable(s), turning `auto`/`none` back into the built-in default
+    (`engine auto` also resets `ENGINE_EXPLICIT`). `cli_setting` is the
+    command-line wrapper: validate (fatal `Invalid --<key>: ...`), assign,
+    and append the key to `CLI_SET_KEYS` (a space-padded string, since
+    bash 3.2 has no associative arrays). Every settable option's parse case
+    now goes through it, which is also what made numeric options validated
+    for the first time. `--no-autoupdate` adds `upgrade-type` to
+    `CLI_SET_KEYS` itself, being an alias of the same setting.
+  - `settings_parse_file` parses one file into
+    `SETTINGS_FILE_KEYS`/`SETTINGS_FILE_VALUES` without applying anything
+    and reports the first problem via `SETTINGS_ERROR`
+    (`<file>:<line>: ...`), so a bad file is rejected whole. Globals rather
+    than command substitution, since arrays can't come back from a
+    subshell. Whitespace is trimmed with `[:space:]` parameter-expansion
+    patterns (which also strips a CRLF's `\r`).
+  - `settings_load_all` applies system, script-location, then user files,
+    skipping `CLI_SET_KEYS`, so later (higher) files override earlier ones
+    per key. Called once in the top-level flow, after the command-line
+    combination checks (which therefore only ever see command-line values)
+    and before every dispatch, including `--status` (`SETTINGS_SILENT` =
+    `$STATUS`: errors and unreadable-file warnings are suppressed and the
+    file skipped). Right after it, `--upgrade-only` clears an
+    `upgrade-type = none` that didn't come from the command line.
+  - `SETTINGS_SCRIPT_DIR` is `$0`'s directory, made absolute, except in a
+    trial run: `upgrade_main` exports `CONTAINER_UPGRADE_ORIGINAL_DIR`
+    alongside `CONTAINER_UPGRADE_APPLIED_FROM`/`_MODE` and unsets it
+    wherever those are unset; the candidate honors it only when
+    `CONTAINER_UPGRADE_APPLIED_FROM` is also set. Made in
+    `tools/blueprints/bash.sh` first. A trial run started by a pre-1.1.9
+    version doesn't pass it, so that one run falls back to its own `$0`
+    directory.
+  - `settings_banner_line` prints the `Using settings from:` line, logged
+    right after the startup banner of a normal run. `--upgrade-check`/
+    `--upgrade-only` print their own report lines and don't show it.
+- **Image prune (1.1.9-dev1)** - see
+  `docs/requirements/implemented/image-prune.md`: `prune_images` (defined
+  just before the Main section) runs once between Phase 1 and Phase 2.
+  It builds `image prune [-a] -f [--filter until=<dur>]`, converting a
+  `<N>d` value to `<N*24>h` via `prune_until_filter` because Go durations
+  have no day unit. The engine's output is logged indented; a non-zero exit
+  logs a plain `WARNING:` line without touching `HAD_ERRORS`. Under
+  `--dry-run` it only logs what would be pruned, plus
+  `image ls -f dangling=true` for `dangling` without an age filter. The
+  effective mode is also shown on the `Engine: ...` summary line and
+  written to the run summary log as `prune` (after `mode`).
+  **Tested**: the unit tests cover `setting_check`, `prune_until_filter`,
+  `settings_parse_file` (comments, quotes, CRLF and every error type),
+  `settings_load_all` (per-key precedence, CLI shielding, auto/none,
+  silent mode, fatal errors) and `settings_banner_line`. Black-box tests
+  run a copy of the script against a stub `docker` that records its calls.
+  They cover prune before the pull and its exact command, CLI overriding
+  the file, a failed prune staying a warning, dry-run output, precedence
+  between the script-location and user files, negation flags,
+  `--engine auto`, fatal settings errors before any engine call,
+  `--status` reading `status-stale-days` and ignoring a broken file, the
+  cooldown still applying with a file `upgrade-level`, and a trial run
+  reading `CONTAINER_UPGRADE_ORIGINAL_DIR`. Passing under macOS's bundled
+  bash 3.2 (no newer bash was available on the test machine). Not verified
+  against a real engine: `podman image prune --filter until=...` (no
+  running Podman machine was available).

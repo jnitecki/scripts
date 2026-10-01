@@ -12,6 +12,42 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.9-dev1
+Adds settings files and image pruning:
+
+1. Settings files, per
+   [script-settings-file-convention.md](../../../docs/requirements/generic/script-settings-file-convention.md)
+   and [settings-file.md](docs/requirements/implemented/settings-file.md):
+   INI-style `key = value` files (full-line `#`/`;` comments, parsed, never
+   sourced) read from
+   `${XDG_CONFIG_HOME:-$HOME/.config}/scripts-config/bash_container-upgrader.conf`
+   (user), `container-upgrader.conf` next to the script (script location)
+   and `/etc/scripts-config/bash_container-upgrader.conf` (system).
+   Precedence per setting: command line > user > script location > system.
+   Any content error is fatal and names the file and line, except under
+   `--status`, which silently ignores a broken file. Loaded files are
+   listed on a `Using settings from:` line after the startup line.
+2. New command-line forms so any file value can be undone:
+   `--no-skip-quadlet-restart`, `--no-skip-manual-unit-restart`,
+   `--no-skip-systemd-restart`, `--no-skip-crashing`,
+   `--no-skip-config-check`, `--engine auto`, `--upgrade-level auto`.
+3. Command line and settings files share one validator, so numeric
+   options (`--timeout`, `--precheck-seconds`, `--recent-restart-threshold`,
+   `--external-restart-wait`, `--status-stale-days`) are now rejected when
+   not a non-negative integer (previously accepted unchecked).
+4. Self-upgrade: only command-line `--upgrade-type`/`--upgrade-level`
+   bypass the check cooldown (`UPGRADE_CLI_EXPLICIT`), never values from a
+   settings file; a trial-run candidate gets the original script directory
+   in `CONTAINER_UPGRADE_ORIGINAL_DIR` so it reads the same script-location
+   settings file. `--upgrade-only` overrides a file's `upgrade-type = none`.
+   Both changes made in `tools/blueprints/bash.sh` first.
+5. New `--prune none|dangling|all` and `--prune-until <N>m|<N>h|<N>d|none`
+   (see [image-prune.md](docs/requirements/implemented/image-prune.md)):
+   one host-wide `image prune` per run, before the image pulls. A failure
+   is a warning only. `--dry-run` reports what would be pruned instead,
+   and lists dangling candidates when no age filter is set. The run summary
+   log gains a `prune` field.
+
 ## 1.1.8
 Adds a self-managed run summary log and a login status banner built on top
 of it. Consolidates `1.1.8-dev1` through `1.1.8-dev3` below into one
