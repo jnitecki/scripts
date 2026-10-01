@@ -12,6 +12,40 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.9
+Adds settings files and image pruning. Consolidates `1.1.9-dev1` and
+`1.1.9-dev2` below into one summary:
+
+1. Settings files, per
+   [script-settings-file-convention.md](../../../docs/requirements/generic/script-settings-file-convention.md)
+   and [settings-file.md](docs/requirements/implemented/settings-file.md):
+   INI-style `key = value` files (full-line `#`/`;` comments, parsed, never
+   sourced) read from the user
+   (`${XDG_CONFIG_HOME:-$HOME/.config}/scripts-config/bash_container-upgrader.conf`),
+   script-location (`container-upgrader.conf` next to the script) and
+   system (`/etc/scripts-config/bash_container-upgrader.conf`) locations.
+   Precedence per setting: command line > user > script location > system.
+   Content errors are fatal and name the file and line, except under
+   `--status`, which silently ignores a broken file. Loaded files are
+   listed on a `Using settings from:` line after the startup line.
+2. New `--no-skip-*` negation flags, `--engine auto` and
+   `--upgrade-level auto` let the command line undo any file value.
+   Numeric options are now validated (non-negative integers).
+3. Self-upgrade: only command-line `--upgrade-type`/`--upgrade-level`
+   bypass the check cooldown, never settings-file values; trial runs
+   receive the original script directory so they read the same
+   script-location settings file. `--upgrade-only` overrides a file's
+   `upgrade-type = none`.
+4. New `--prune none|dangling|all` (default `dangling`) and
+   `--prune-until <N>m|<N>h|<N>d|none` prune images host-wide once per
+   run, before the image pulls. A failure is a warning only; `--dry-run`
+   reports what would be pruned instead. The run summary log gains a
+   `prune` field. See
+   [image-prune.md](docs/requirements/implemented/image-prune.md).
+
+See the individual `1.1.9-dev1` and `1.1.9-dev2` entries below for the
+exact per-bump breakdown.
+
 ## 1.1.9-dev2
 `--prune` now defaults to `dangling` instead of `none`: every run prunes
 dangling images unless `--prune none` (or `prune = none` in a settings

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.9-dev2
+# Version: 1.1.9
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,9 +14,9 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.9 (in progress - currently 1.1.9-dev2) - adds settings files
-#           and image pruning. Settings files (INI-style key = value,
-#           # or ; full-line comments) are read from the user
+#   1.1.9 - adds settings files and image pruning. Settings files
+#           (INI-style key = value, # or ; full-line comments) are read
+#           from the user
 #           ($XDG_CONFIG_HOME/scripts-config/bash_container-upgrader.conf),
 #           script-location (container-upgrader.conf next to the script)
 #           and system (/etc/scripts-config/bash_container-upgrader.conf)
@@ -26,8 +26,8 @@
 #           numeric options are now validated. New --prune none|dangling|
 #           all (default: dangling) and --prune-until <N>m|h|d prune images
 #           once per run, before the pulls (a failure is a warning only;
-#           --prune none turns it off); the run summary log
-#           gains a "prune" field. See docs/requirements/implemented/
+#           --prune none turns it off); the run summary log gains a
+#           "prune" field. See docs/requirements/implemented/
 #           settings-file.md and image-prune.md.
 #   1.1.8 - adds a self-managed run summary log and a login status banner
 #           (--status, --register-banner/--unregister-banner); see
