@@ -220,14 +220,14 @@ best-effort and never affects the run's own exit code.
 
 ## Image prune
 
-Upgrades leave the replaced images on disk. `--prune` removes unneeded
-images as part of a normal run:
+Upgrades leave the replaced images on disk. By default, every run removes
+dangling images; `--prune` selects what is removed:
 
-- **`none`** (default) — no pruning.
-- **`dangling`** — untagged images not used by any container
+- **`dangling`** (default) — untagged images not used by any container
   (`<engine> image prune -f`).
 - **`all`** — every image not used by any container, running or stopped
   (`<engine> image prune -a -f`).
+- **`none`** — no pruning.
 
 Pruning runs once per run, host-wide (even when container names are given),
 after the self-upgrade step and **before** the image pulls. Nothing pulled
@@ -365,7 +365,7 @@ command line always wins. Numeric values must be non-negative integers.
 | `--skip-crashing` | Do not attempt to upgrade containers detected as already crashing before the upgrade. Default is to attempt them anyway (see policy above). |
 | `--no-skip-quadlet-restart`, `--no-skip-manual-unit-restart`, `--no-skip-systemd-restart`, `--no-skip-crashing`, `--no-skip-config-check` | Turn the matching `--skip-*` option off again, e.g. when a settings file turned it on. |
 | `--engine docker\|podman\|auto` | Container engine to use. Default: `auto` — docker if present, else podman, else errors out. |
-| `--prune none\|dangling\|all` | Remove unneeded images, host-wide, once per run before the image pulls. See [Image prune](#image-prune). Default: `none`. |
+| `--prune none\|dangling\|all` | Remove unneeded images, host-wide, once per run before the image pulls. See [Image prune](#image-prune). Default: `dangling`. |
 | `--prune-until <N>m\|<N>h\|<N>d\|none` | Only prune images whose creation (build) time is older than this. Default: `none`. |
 | `--skip-config-check` | In safe mode, skip comparing the recreated container's runtime config against the original. Use if a specific container reliably shows a diff you've already verified is harmless. |
 | `--dry-run` | Show what would happen, take no action, and skip the health-outcome summary (nothing was run). |

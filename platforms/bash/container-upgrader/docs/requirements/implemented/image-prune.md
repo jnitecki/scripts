@@ -14,8 +14,8 @@ touched (no `system prune`).
 ### 1. `--prune none|dangling|all`
 | Value | Command |
 | --- | --- |
-| `none` (default) | No pruning — behavior unchanged from before this feature. |
-| `dangling` | `<engine> image prune -f` — untagged images not referenced by any container. |
+| `none` | No pruning — behavior from before this feature. |
+| `dangling` (default) | `<engine> image prune -f` — untagged images not referenced by any container. |
 | `all` | `<engine> image prune -a -f` — every image not used by any container, running or stopped. |
 
 Can also be set as `prune` in the settings file ([[settings-file]]).

@@ -12,6 +12,11 @@ pre-release entries already recorded for that cycle below. See
 [docs/requirements/generic/script-maintenance-convention.md](../../../docs/requirements/generic/script-maintenance-convention.md)
 section 3 for the exact rule.
 
+## 1.1.9-dev2
+`--prune` now defaults to `dangling` instead of `none`: every run prunes
+dangling images unless `--prune none` (or `prune = none` in a settings
+file) is given. See [image-prune.md](docs/requirements/implemented/image-prune.md).
+
 ## 1.1.9-dev1
 Adds settings files and image pruning:
 

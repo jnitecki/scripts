@@ -533,18 +533,27 @@ bb_run() {
 bb_reset() { rm -rf "$BB/home"; mkdir -p "$BB/home/.config/scripts-config"; rm -f "$APP_CONF"; }
 line_of() { grep -n -F -- "$1" "$BB/stub.log" | head -n1 | cut -d: -f1; }
 
-# --- no settings, no --prune: unchanged behavior -------------------------------
+# --- no settings, no --prune: default is dangling ----------------------------
 bb_reset
 bb_run --no-autoupdate --engine docker
-if [[ "$BB_CODE" -eq 0 ]] && ! grep -q 'image prune' "$BB/stub.log" && [[ "$BB_OUT" != *"Using settings from"* ]]; then
-  pass "black-box: no settings and no --prune -> no prune, no settings line"
+if [[ "$BB_CODE" -eq 0 ]] && grep -qx 'image prune -f' "$BB/stub.log" && [[ "$BB_OUT" != *"Using settings from"* ]]; then
+  pass "black-box: no settings and no --prune -> dangling prune by default, no settings line"
 else
   fail "black-box: default run - exit=$BB_CODE, stub log: $(tr '\n' '|' < "$BB/stub.log") output: $BB_OUT"
 fi
-if [[ "$(tail -n1 "$STATE_LOG" 2>/dev/null | jq -r '.prune')" == "none" ]]; then
-  pass "black-box: run summary log records prune=none"
+if [[ "$(tail -n1 "$STATE_LOG" 2>/dev/null | jq -r '.prune')" == "dangling" ]]; then
+  pass "black-box: run summary log records the default prune=dangling"
 else
-  fail "black-box: run summary log missing prune=none: $(tail -n1 "$STATE_LOG" 2>/dev/null)"
+  fail "black-box: run summary log missing prune=dangling: $(tail -n1 "$STATE_LOG" 2>/dev/null)"
+fi
+
+# --- --prune none disables pruning ----------------------------------------------
+bb_run --no-autoupdate --engine docker --prune none
+if [[ "$BB_CODE" -eq 0 ]] && ! grep -q 'image prune' "$BB/stub.log" \
+    && [[ "$(tail -n1 "$STATE_LOG" 2>/dev/null | jq -r '.prune')" == "none" ]]; then
+  pass "black-box: --prune none -> no prune, logged as prune=none"
+else
+  fail "black-box: --prune none - exit=$BB_CODE, stub log: $(tr '\n' '|' < "$BB/stub.log")"
 fi
 
 # --- user file: prune dangling + prune-until, before the pull ----------------

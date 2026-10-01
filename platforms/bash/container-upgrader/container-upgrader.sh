@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.9-dev1
+# Version: 1.1.9-dev2
 # Category: containers
 # Description: Docker image upgrade automation with rollback support
 # Upgrade-Source: github.com/jnitecki/scripts@bash/container-upgrader
@@ -14,7 +14,7 @@
 # entry for the whole in-progress cycle (every pre-release bump since the
 # last stable release, merged into one) until promoted back to stable -
 # see script-maintenance-convention.md section 3:
-#   1.1.9 (in progress - currently 1.1.9-dev1) - adds settings files
+#   1.1.9 (in progress - currently 1.1.9-dev2) - adds settings files
 #           and image pruning. Settings files (INI-style key = value,
 #           # or ; full-line comments) are read from the user
 #           ($XDG_CONFIG_HOME/scripts-config/bash_container-upgrader.conf),
@@ -24,8 +24,9 @@
 #           per setting. New --no-skip-* negation flags and --engine auto/
 #           --upgrade-level auto let the command line undo any file value;
 #           numeric options are now validated. New --prune none|dangling|
-#           all and --prune-until <N>m|h|d prune images once per run, before
-#           the pulls (a failure is a warning only); the run summary log
+#           all (default: dangling) and --prune-until <N>m|h|d prune images
+#           once per run, before the pulls (a failure is a warning only;
+#           --prune none turns it off); the run summary log
 #           gains a "prune" field. See docs/requirements/implemented/
 #           settings-file.md and image-prune.md.
 #   1.1.8 - adds a self-managed run summary log and a login status banner
@@ -193,8 +194,8 @@
 #                        what an upgrade leaves behind goes on the next
 #                        run. dangling: untagged images not used by any
 #                        container; all: every image not used by any
-#                        container. A failed prune is a warning only.
-#                        Default: none.
+#                        container; none: no pruning. A failed prune is a
+#                        warning only. Default: dangling.
 #   --prune-until <N>m|<N>h|<N>d|none  Only prune images CREATED (built)
 #                        more than this long ago - the image's build time,
 #                        not when it was pulled here. Default: none.
@@ -345,7 +346,7 @@ STATUS_STALE_DAYS=3
 STATUS_STALE_DAYS_EXPLICIT=false
 REGISTER_BANNER=false
 UNREGISTER_BANNER=false
-PRUNE="none"
+PRUNE="dangling"
 PRUNE_UNTIL=""
 TARGETS=()
 
